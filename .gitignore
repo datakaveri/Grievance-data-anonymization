@@ -1,0 +1,61 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+chandra_venv/
+
+# Environment variables & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Application Data & Outputs
+data/source_images/*
+!data/source_images/.gitkeep
+output/
+*.xlsx
+*.csv
+_chandra_tmp/
+_chandra_manifest/
+
+# Logs
+*.log
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker / System artifacts
+.DS_Store
+.antigravity/

@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Virtual Environments
+venv/
+.venv/
+chandra_venv/
+
+# Python Cache & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Data & Output Files
+output/
+_chandra_tmp/
+_chandra_manifest/
+*.xlsx
+*.csv
+*.log
+
+# Docker & IDE Files
+Dockerfile
+.dockerignore
+.vscode/
+.idea/
+.env
+.env.local
+README.md

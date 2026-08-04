@@ -1,0 +1,21 @@
+services:
+  anonymizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grievance_anonymizer
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - IMAGE_FOLDER_PATH=/app/data/source_images
+      - OUTPUT_DIR=/app/output
+    volumes:
+      - ./data/source_images:/app/data/source_images
+      - ./output:/app/output
+    # Enable NVIDIA GPU support if docker container toolkit is available:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
