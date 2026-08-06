@@ -1,906 +1,1174 @@
-# ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  CELL 5 — UNIFIED BATCH PIPELINE: EXPANDED PII + OPTIMIZED NER & OCR         ║
-# ║                                                                              ║
-# ║  FIXES APPLIED:                                                              ║
-# ║  [FIX-1] TypeError: _sanitize_parameters() unexpected kwarg 'truncation'     ║
-# ║           → Removed 'truncation' & 'padding' from pipeline() kwargs.         ║
-# ║           → Truncation now applied at inference time via tokenizer call.     ║
-# ║           → pipe.tokenizer.truncation = True removed (not a valid attr).     ║
-# ║  [FIX-2] Long execution time                                                 ║
-# ║           → Text lines chunked to ≤ 128 tokens before NER inference.         ║
-# ║           → batch_size reduced to 16 (prevents OOM on long token seqs).      ║
-# ║           → NER inference wrapped with truncation=True, max_length=512.      ║
-# ║           → del pipe uses hasattr guards (prevents AttributeError).          ║
-# ║  [FIX-3] Sign detection model explanation added (see section 3B).            ║
-# ║  [FIX-4] PII tags exported as SEPARATE columns per PII type in Excel.        ║
-# ║  [FIX-5] Anonymization applied per PII type with correct masking rules.      ║
-# ║  [FIX-6] process_ner_and_pii_for_lines now passes truncation at runtime.     ║
-# ╚════════════════════════════════════════════════════════════════════════════╝
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  CELL 5 — COMPLETE PIPELINE  v5  (all issues fixed + new models)           ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# KEY CHANGES vs v4
+# ─────────────────
+# [H1]  Sheet 2 & 3 are now ONE ROW PER SOURCE FILE (not per line).
+#        - Sheet 3: Source_File, File_Type, Language, Full_Extracted_Text,
+#                   Spell_Corrected_Text, Detected_PII_With_Tags,
+#                   Anonymized_PII_Output, PII_Types_Detected (values),
+#                   PII_Types_Not_Detected (display names)
+#        - Sheet 2: Source_File, File_Type, Language, Full_Extracted_Text,
+#                   Spell_Corrected_Text, then per-model columns:
+#                   {Model}_Predicted_Type, {Model}_Extracted_Text,
+#                   {Model}_Missed_Entities
+#
+# [H2]  Language detection added — "Hindi", "English", "Mixed" per file.
+#
+# [H3]  Spell correction stage added between OCR and PII/NER:
+#        - Primary  : Qwen2.5-7B-Instruct (via venv subprocess)
+#        - Fallback : Levenshtein Guard (symspellpy / rapidfuzz)
+#        Corrected text is what goes into PII detection and NER.
+#
+# [H4]  PII detection replaced with model-based detectors (all run in
+#        the MAIN kernel, no extra venv needed):
+#        - Presidio  with HuggingFace recogniser (en_core_web_lg / RoBERTa)
+#        - Piiranha  (fhrzn/pii-detection-roberta-base)
+#        - GLiNER-PII (urchade/gliner_multi_pii-v1)
+#        Results merged; regex patterns kept as fast pre-filter.
+#
+# [H5]  PII_Types_Not_Detected  → shows the actual detected VALUES of the
+#        PII types that were NOT found (was wrongly showing type-tag names).
+#        Corrected: shows missing type DISPLAY NAMES (e.g. "Aadhaar, PAN").
+#        PII_Types_Detected     → shows "Type: value" pairs actually found.
+#
+# [H6]  Sheet 2 NER model columns use safe Excel names:
+#        {ModelShortName}_Predicted_Type, _Extracted_Text, _Missed_Entities
+#
+# [H7]  Devanagari/Hindi text: PII regex skipped; model-based detectors
+#        handle Indic PII (names, account numbers in Hindi script).
 
-import os
-import re
-import gc
-import time
-import uuid
-import subprocess
-import warnings
-import torch
-import pandas as pd
-from PIL import Image as PILImage
+import subprocess, sys, os, re, gc, json, uuid, warnings, shutil
+import torch, pandas as pd
+from bs4 import BeautifulSoup
 
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. HARDWARE & PATH SETUP
+# 0. PACKAGE BOOTSTRAP
 # ─────────────────────────────────────────────────────────────────────────────
-DEVICE_ID = 0 if torch.cuda.is_available() else -1
-print(f"[Pipeline] Executing on: {'GPU (CUDA)' if DEVICE_ID == 0 else 'CPU'}")
+def _pip(*pkgs):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], check=True)
 
-HF_TOKEN = os.getenv("HF_TOKEN", None)
+try:
+    import docx
+except ModuleNotFoundError:
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "docx"], check=False)
+    _pip("python-docx>=1.1.0")
+    import docx
 
-BASE_DIR = os.getenv("BASE_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-IMAGE_FOLDER_PATH = os.getenv("IMAGE_FOLDER_PATH", "/kaggle/input/datasets/gogul0604/kaggle-image-datasets/Source-image" if os.path.exists("/kaggle/input") else os.path.join(BASE_DIR, "data", "source_images"))
-OUTPUT_DIR        = os.getenv("OUTPUT_DIR", "/kaggle/working/output" if os.path.exists("/kaggle/working") else os.path.join(BASE_DIR, "output"))
-OUTPUT_EXCEL      = os.path.join(OUTPUT_DIR, "chandra_ner_pii_batch_comparison.xlsx")
+try:
+    import pypdf
+except ModuleNotFoundError:
+    _pip("pypdf>=4.0.0")
+    import pypdf
+
+try:
+    import openpyxl
+except ModuleNotFoundError:
+    _pip("openpyxl>=3.1.0")
+
+try:
+    import rapidfuzz
+except ModuleNotFoundError:
+    _pip("rapidfuzz>=3.0")
+
+try:
+    import symspellpy
+except ModuleNotFoundError:
+    _pip("symspellpy")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. HARDWARE & PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+DEVICE_ID  = 0 if torch.cuda.is_available() else -1
+DEVICE_STR = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"[Pipeline] Device: {DEVICE_STR.upper()}")
+
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+if HF_TOKEN:
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
+
+DATASET_FOLDER_PATH = "/kaggle/input/datasets/gogul0604/raw-image"
+OUTPUT_DIR          = "/kaggle/working/output"
+OUTPUT_EXCEL        = os.path.join(OUTPUT_DIR, "chandra2_ner_pii_report.xlsx")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(IMAGE_FOLDER_PATH, exist_ok=True)
 
-CHANDRA_VENV_PY = os.getenv("CHANDRA_VENV_PY", "/kaggle/working/chandra_venv/bin/python" if os.path.exists("/kaggle/working") else os.path.join(BASE_DIR, "chandra_venv", "bin", "python"))
-CHANDRA_SCRIPT  = os.getenv("CHANDRA_SCRIPT", "/kaggle/working/chandra_infer_script.py" if os.path.exists("/kaggle/working") else os.path.join(BASE_DIR, "chandra_infer_script.py"))
+CHANDRA_VENV_PY = "/kaggle/working/chandra_venv/bin/python"
+CHANDRA_SCRIPT  = "/kaggle/working/chandra_infer_script.py"
+if not os.path.exists(CHANDRA_VENV_PY) or not os.path.exists(CHANDRA_SCRIPT):
+    raise RuntimeError("Cell 3.5 output missing — run Cell 3.5 first.")
 
-# REPLACE with (adds a quick smoke-test):
-if not os.path.exists(CHANDRA_VENV_PY):
-    raise RuntimeError("Chandra 2 venv not found. Run Cell 3.5 first.")
-if not os.path.exists(CHANDRA_SCRIPT):
-    raise RuntimeError("chandra_infer_script.py not found. Run Cell 3.5 first.")
-
-# Verify the script was written with --manifest support (not the old --image version)
-with open(CHANDRA_SCRIPT, "r") as _f:
-    if "--manifest" not in _f.read():
-        raise RuntimeError(
-            "chandra_infer_script.py is the OLD single-image version. "
-            "Re-run Cell 3.5 to regenerate it with --manifest support."
-        )
+IMAGE_BATCH_SIZE = 3   # images per Chandra subprocess call
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. MODEL REGISTRY
+# 2. NER MODEL REGISTRY
 # ─────────────────────────────────────────────────────────────────────────────
-MODELS = {
-    "HiNER (IIT Bombay / MuRIL)":  "cfilt/HiNER-original-muril-base-cased",
-    "IndicNER (AI4Bharat)":          "ai4bharat/IndicNER" if HF_TOKEN else "techysanoj/fine-tuned-IndicNER",
-    "BERT-Base-NER (English)":       "dslim/bert-base-NER",
-    "XLM-RoBERTa (Multilingual)":   "Babelscape/wikineural-multilingual-ner",
+NER_MODELS = {
+    "HiNER":      "cfilt/HiNER-original-muril-base-cased",
+    "IndicNER":   "ai4bharat/IndicNER",
+    "BERT_NER":   "dslim/bert-base-NER",
+    "XLM_RoBERTa":"Babelscape/wikineural-multilingual-ner",
+}
+# Short names used as Excel column prefixes (no special chars)
+NER_SHORT = list(NER_MODELS.keys())   # ["HiNER", "IndicNER", "BERT_NER", "XLM_RoBERTa"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. PII DISPLAY NAMES & REGEX (fast pre-filter)
+# ─────────────────────────────────────────────────────────────────────────────
+PII_DISPLAY_NAMES = {
+    "Aadhaar":        "Aadhaar",
+    "PAN":            "PAN",
+    "Phone_Number":   "Phone Number",
+    "Email":          "Email",
+    "Medical_UHID":   "Medical UHID",
+    "Passport":       "Passport",
+    "Voter_ID":       "Voter ID",
+    "Vehicle_Number": "Vehicle Number",
+    "Bank_Account":   "Bank Account",
+    "Credit_Card":    "Credit Card",
+    "DOB":            "Date of Birth",
+    "PPP_ID":         "PPP ID",
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3A. EXPANDED REGEX PATTERNS FOR PII DETECTION (20 categories)
-# ─────────────────────────────────────────────────────────────────────────────
 PII_PATTERNS = {
-    "Email":          re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", re.I),
     "Aadhaar":        re.compile(r"\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b"),
     "PAN":            re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"),
-    "Voter_ID":       re.compile(r"\b[A-Z]{3}\d{7}\b"),
-    "PPP_ID":         re.compile(r"\b[A-Z0-9]{8,10}\b"),
+    "Phone_Number":   re.compile(
+        r"(?:\+?91[\s\-]?)?[6-9]\d{9}\b|\+91[\s\-]?\d{2}[\s\-]?\d{4}[\s\-]?\d{4}\b"
+    ),
+    "Email":          re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", re.I),
+    "Medical_UHID":   re.compile(
+        r"\b(?:UHID|PMRN|IPD|EPISODE)[\s\:\.\-]*[A-Z]{2,6}[\.\-]?\d{5,15}\b", re.I
+    ),
     "Passport":       re.compile(r"\b[A-PR-WY][1-9]\d{7}\b"),
+    "Voter_ID":       re.compile(r"\b[A-Z]{3}\d{7}\b"),
     "Vehicle_Number": re.compile(r"\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b"),
-    "Phone_Number":   re.compile(r"(?:(?:\+?91[\s\-]?)?[6-9]\d{9})\b"),
-    "Bank_Account":   re.compile(r"\b\d{11,16}\b"),
+    "Bank_Account":   re.compile(r"(?<!\d)\d{14,18}(?!\d)"),
     "Credit_Card":    re.compile(r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13})\b"),
-    "DOB":            re.compile(r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}\b"),
-    "Date":           re.compile(r"\b\d{1,2}[\/\-.](?:\d{1,2}|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\/\-.]\d{2,4}\b", re.I),
-    "User_ID":        re.compile(r"\b(?:user|uid|usr|id)[\_\-\:\s]*[a-zA-Z0-9]{4,15}\b", re.I),
-    "IP_Address":     re.compile(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"),
-    # ── [FIX-3] Sign: Keyword-based regex on OCR text output.
-    # NOTE: This is NOT a vision/image-level model. It detects the WORD "signature"
-    # and its Hindi/Devanagari equivalents in OCR-extracted text.
-    # For true image-level signature detection, a specialized CV model is needed
-    # (e.g., a fine-tuned YOLO/EfficientDet trained on signature bounding boxes).
-    "Sign":           re.compile(
-        r"\b(signature|sign(ed|ature)?|hastakshar|दस्तखत|हस्ताक्षर|हस्त\s?क्षर)\b", re.I
+    "DOB":            re.compile(
+        r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}\b"
     ),
-    "Relation":       re.compile(
-        r"\b(S\/o|D\/o|W\/o|C\/o|Father|Mother|Spouse|Son|Daughter|Husband|Wife"
-        r"|पति|पत्नी|पुत्र|पुत्री)\b", re.I
-    ),
+    "PPP_ID":         re.compile(r"\b(?:PPP|PPPID|FAMILYID|FID)[\_\-\:\s]*[A-Z0-9]{6,10}\b"),
 }
-
-# All PII column names (used for per-column Excel export)
-ALL_PII_TYPES = list(PII_PATTERNS.keys()) + ["Location", "Address", "Name", "Organization"]
 
 INDIAN_CITIES = {
-    "bangalore", "bengaluru", "mumbai", "delhi", "new delhi", "chennai",
-    "kolkata", "hyderabad", "pune", "ahmedabad", "jaipur", "lucknow",
-    "chandigarh", "surat", "nagpur", "patna", "bhopal", "indore",
-    "visakhapatnam", "coimbatore", "kochi",
+    "bangalore","bengaluru","mumbai","delhi","new delhi","chennai","kolkata",
+    "hyderabad","pune","ahmedabad","jaipur","lucknow","bhubaneswar","gachibowli",
+    "kalinga nagar","secunderabad","noida","gurugram","gurgaon","visakhapatnam",
+    "vijayawada","jalaun","orai",
 }
 
-ADDRESS_KEYWORDS = re.compile(
-    r"\b(street|road|st|rd|nagar|colony|flat|house|building|floor|dist|district"
-    r"|pin|pincode|address|पता)\b", re.I
+_EXCL_ORGS = {
+    "INSTITUTE","SCIENCES","HOSPITAL","UNIVERSITY","ACADEMY","DEPARTMENT",
+    "LABORATORY","AUTHORITY","MINISTRY","FOUNDATION","BIOCHEMISTRY",
+    "GASTROENTEROLOGY","DIAGNOSTIC","PATHOLOGY",
+}
+
+INDIAN_TITLE_REGEX = re.compile(
+    r"\b(?:Shri|Sri|Smt|Mr|Mrs|Ms|Miss|Dr|Prof|Kumar|Kumari)"
+    r"\.?(?:\s*[A-Z]\.)*\s*[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\b",
+    re.IGNORECASE,
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3B. SIGN DETECTION — MODEL EXPLANATION
-# ─────────────────────────────────────────────────────────────────────────────
-"""
-SIGN DETECTION — HOW IT WORKS IN THIS PIPELINE:
-================================================
-Current approach (Regex / Keyword-based):
-  - After OCR extracts text from the image, we search for signature-related
-    keywords: "signature", "signed", "hastakshar", "दस्तखत", "हस्ताक्षर"
-  - This is TEXTUAL detection — it fires if the document contains a label
-    like "Signature:" or "हस्ताक्षर:" near the signature area.
-  - Model: NO separate ML model — pure regex on OCR output.
-  - Limitation: Doesn't detect actual handwritten strokes; only the label.
-
-For TRUE vision-level signature detection (recommended upgrade):
-  - Use a fine-tuned object detection model (e.g., YOLOv8, EfficientDet)
-    trained on signature bounding boxes from document images.
-  - Alternatively, use a LayoutLM / DocFormer model that jointly understands
-    image regions and text, and has been fine-tuned for form field detection.
-  - Dataset: Tobacco800, CEDAR, SigNet for training signature detectors.
-  - Integration: Run the detection model on the raw PIL image BEFORE OCR,
-    and add "Sign: [DETECTED at bbox]" to the PII list independently of OCR text.
-"""
+_NOISE_TOKENS = {
+    "The","A","An","In","On","At","To","Of","For","And","But","Or","Is","Are",
+    "Name","Date","Address","Phone","Email","Report","Page","Clinical","Patient",
+    "Method","Sample","Type","Unit","Result","Serum","Test","End",
+} | _EXCL_ORGS
+_NOISE_LOWER = {t.lower() for t in _NOISE_TOKENS}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3C. ANONYMIZATION RULES PER PII TYPE
+# 4. LANGUAGE DETECTION  [H2]
 # ─────────────────────────────────────────────────────────────────────────────
-"""
-FREE TEXT ANONYMIZATION — EXPLANATION:
-========================================
-Free text anonymization is the process of detecting and redacting/masking
-sensitive personal information (PII) from unstructured plain text (as opposed
-to structured database records). Unlike databases where you know which column
-holds a phone number, free text (e.g., OCR output from ID cards, letters,
-forms) mixes PII with non-sensitive context.
+_DEVA_RE = re.compile(r"[\u0900-\u097F]")
 
-Techniques:
-  1. Regex-based detection  → Pattern matching for known formats (Aadhaar, PAN).
-  2. NER-based detection    → ML models detect names, orgs, locations contextually.
-  3. Masking / Redaction    → Replace PII with a placeholder or partial mask.
-  4. Tokenization           → Replace PII with a reversible token (for systems
-                               that need to recover the original later).
-  5. Generalization         → Replace exact value with a broader category
-                               (e.g., age 34 → "30s").
-  6. Suppression            → Remove the entire field/sentence containing PII.
+def detect_language(text: str) -> str:
+    deva = len(_DEVA_RE.findall(text))
+    latin = len(re.findall(r"[A-Za-z]", text))
+    if deva == 0:
+        return "English"
+    if latin == 0:
+        return "Hindi"
+    ratio = deva / max(deva + latin, 1)
+    return "Hindi" if ratio > 0.6 else ("Mixed" if ratio > 0.2 else "English")
 
-ANONYMIZATION STRATEGY PER PII TYPE:
-======================================
-  Aadhaar      → Show last 4 digits, mask first 8: "XXXX XXXX 1234"
-  PAN          → Mask middle 4 digits: "ABCXX999X" → "ABCXXXXXX"  actually: keep first 3 + last 1, mask 5-8 → "ABC****X"  
-                 Standard: first 5 alpha + 4 digits + 1 alpha. Mask digits: "ABCDE****A"
-  Passport     → Mask last 6 characters: "A1234XXX"
-  Voter_ID     → Mask last 5 digits: "ABC12XXXXX" 
-  Phone_Number → Mask middle 6 digits: "+91 XXXXX67890" → "+91 XXXXX XXXX" (show last 2 only)
-                 Better: mask all but last 4: "XXXXXX7890"
-  Credit_Card  → PCI-DSS standard: show last 4 digits only: "XXXX XXXX XXXX 1234"
-  Bank_Account → Show last 4 digits: "XXXXXXXX1234"
-  Email        → Mask local part beyond first 2 chars: "ab****@domain.com"
-  DOB          → Generalize to year only: "****-**-1985" or just "1985"
-  Date         → Keep as-is (non-sensitive unless it's a DOB)
-  IP_Address   → Mask last octet: "192.168.1.XXX"
-  User_ID      → Full masking: "[USER_ID REDACTED]"
-  Vehicle_Number → Mask middle part: "MH 02 XX XXXX"
-  PPP_ID       → Full masking: "[PPP_ID REDACTED]"
-  Sign         → Replace with "[SIGNATURE DETECTED]"
-  Relation     → Keep as-is (relation type is not sensitive, only the person name is)
-  Name         → Replace with "[NAME REDACTED]" or "[PERSON]"
-  Location     → Replace with "[LOCATION]" for sensitive contexts
-  Address      → Replace with "[ADDRESS REDACTED]"
-  Organization → Keep (usually non-sensitive unless it's a medical/legal org)
-"""
-
-def anonymize_pii(pii_type: str, value: str) -> str:
-    """
-    Returns the anonymized version of a detected PII value.
-    Each PII type has a specific masking rule.
-    """
-    v = value.strip()
-
-    if pii_type == "Aadhaar":
-        # Remove spaces/dashes, keep last 4, mask first 8 → "XXXX XXXX 1234"
-        digits = re.sub(r"[\s\-]", "", v)
-        if len(digits) == 12:
-            return f"XXXX XXXX {digits[-4:]}"
-        return "XXXX XXXX XXXX"  # fallback if malformed
-
-    elif pii_type == "PAN":
-        # Format: ABCDE1234F — mask the 4 digits (positions 6-9)
-        if len(v) == 10:
-            return f"{v[:5]}XXXX{v[-1]}"
-        return "XXXXXXXXXX"
-
-    elif pii_type == "Passport":
-        # Format: A1234567 (8 chars) — mask last 6
-        if len(v) == 8:
-            return f"{v[:2]}XXXXXX"
-        return "XXXXXXXX"
-
-    elif pii_type == "Voter_ID":
-        # Format: ABC1234567 (10 chars) — mask last 5 digits
-        if len(v) == 10:
-            return f"{v[:3]}XXXXX{v[-2:]}" if len(v) > 5 else "XXXXXXXXXX"
-        return v[:3] + "XXXXXXX"
-
-    elif pii_type == "Phone_Number":
-        # Keep only last 4 digits visible: "XXXXXX7890"
-        digits = re.sub(r"[\s\-\+]", "", v)
-        if len(digits) >= 4:
-            return "X" * (len(digits) - 4) + digits[-4:]
-        return "XXXXXXXXXX"
-
-    elif pii_type == "Credit_Card":
-        # PCI-DSS: show only last 4 digits: "XXXX XXXX XXXX 1234"
-        digits = re.sub(r"[\s\-]", "", v)
-        if len(digits) >= 4:
-            return "XXXX XXXX XXXX " + digits[-4:]
-        return "XXXX XXXX XXXX XXXX"
-
-    elif pii_type == "Bank_Account":
-        # Show only last 4 digits
-        digits = re.sub(r"[\s\-]", "", v)
-        if len(digits) >= 4:
-            return "X" * (len(digits) - 4) + digits[-4:]
-        return "XXXXXXXXXXXX"
-
-    elif pii_type == "Email":
-        # Mask local part beyond first 2 chars: "ab****@domain.com"
-        parts = v.split("@")
-        if len(parts) == 2:
-            local, domain = parts
-            if len(local) > 2:
-                return local[:2] + "*" * (len(local) - 2) + "@" + domain
-        return "****@****.***"
-
-    elif pii_type == "DOB":
-        # Generalize to year only: show only the year part
-        year_match = re.search(r"(19|20)\d{2}", v)
-        if year_match:
-            return f"****/**/{year_match.group(0)}"
-        return "**/**/****"
-
-    elif pii_type == "IP_Address":
-        # Mask last octet: "192.168.1.XXX"
-        parts = v.split(".")
-        if len(parts) == 4:
-            return f"{parts[0]}.{parts[1]}.{parts[2]}.XXX"
-        return "XXX.XXX.XXX.XXX"
-
-    elif pii_type == "Vehicle_Number":
-        # Format: MH02AB1234 — mask middle section
-        # Pattern: [State][Dist][Series][Number] → mask series+number
-        match = re.match(r"([A-Z]{2})[\s\-]?(\d{2})[\s\-]?([A-Z]{1,2})[\s\-]?(\d{4})", v)
-        if match:
-            return f"{match.group(1)} {match.group(2)} XX XXXX"
-        return "XX XX XX XXXX"
-
-    elif pii_type in ("PPP_ID", "User_ID"):
-        return f"[{pii_type} REDACTED]"
-
-    elif pii_type == "Sign":
-        return "[SIGNATURE DETECTED]"
-
-    elif pii_type == "Name":
-        return "[NAME REDACTED]"
-
-    elif pii_type == "Location":
-        return "[LOCATION]"
-
-    elif pii_type == "Address":
-        return "[ADDRESS REDACTED]"
-
-    elif pii_type == "Organization":
-        # Generally non-sensitive; optionally keep or redact
-        return v  # Keep organization names; change to "[ORG REDACTED]" if needed
-
-    elif pii_type == "Relation":
-        # The relation type (S/o, D/o) is not sensitive; the name next to it is
-        return v  # Keep the relation marker, the associated Name will be redacted
-
-    elif pii_type == "Date":
-        return v  # Generic dates (non-DOB) are usually not PII
-
-    else:
-        return "[REDACTED]"
-
-
-def scan_pii_rules(text: str) -> dict:
-    """
-    Detects structured PII using regex rules.
-    Returns a dict mapping PII type → list of found values.
-    Each type is also anonymized in a parallel dict.
-    """
-    found   = {pii_type: [] for pii_type in ALL_PII_TYPES}
-    anon    = {pii_type: [] for pii_type in ALL_PII_TYPES}
-
-    # ── Regex-based detection ─────────────────────────────────────────────────
-    for label, pat in PII_PATTERNS.items():
-        for m in pat.finditer(text):
-            raw_val = m.group(0).strip()
-            found[label].append(raw_val)
-            anon[label].append(anonymize_pii(label, raw_val))
-
-    # ── Location rule ─────────────────────────────────────────────────────────
-    text_lower = text.lower()
-    for city in INDIAN_CITIES:
-        if city in text_lower:
-            found["Location"].append(city.title())
-            anon["Location"].append(anonymize_pii("Location", city.title()))
-
-    # ── Address rule ──────────────────────────────────────────────────────────
-    if ADDRESS_KEYWORDS.search(text):
-        snippet = text[:80].strip()
-        found["Address"].append(snippet)
-        anon["Address"].append(anonymize_pii("Address", snippet))
-
-    return found, anon
-
+def has_devanagari(text: str) -> bool:
+    return bool(_DEVA_RE.search(text))
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. CHANDRA 2 OCR UTILITIES
+# 5. OCR OUTPUT SANITISER
 # ─────────────────────────────────────────────────────────────────────────────
-# ADD this function in its place:
-def run_chandra_ocr_batch(image_paths: list) -> dict:
-    """
-    Runs ONE subprocess that loads Chandra 2 once and processes ALL images.
-    Returns dict: {image_path: markdown_text}
+_HTML_TAG  = re.compile(r"<[^>]+>", re.DOTALL)
+_DATA_ATTR = re.compile(r'\s*data-\w+="[^"]*"', re.I)
+_MD_HEAD   = re.compile(r"^#{1,6}\s*", re.MULTILINE)
+_MD_BOLD   = re.compile(r"\*\*(.+?)\*\*")
+_MD_TSEP   = re.compile(r"^\s*\|?[-:\s|]+\|?\s*$", re.MULTILINE)
+_MD_TROW   = re.compile(r"^\|(.+)\|$", re.MULTILINE)
 
-    Timeout is set per-image (90s each) as a total budget, not per-subprocess.
-    The subprocess itself runs until ALL images are done.
-    """
-    import json
+def sanitise_ocr(text: str) -> str:
+    if not text:
+        return ""
+    text = _DATA_ATTR.sub("", text)
+    text = _HTML_TAG.sub("", text)
+    def _trow(m):
+        return "  ".join(c.strip() for c in m.group(1).split("|") if c.strip())
+    text = _MD_TSEP.sub("", text)
+    text = _MD_TROW.sub(_trow, text)
+    text = _MD_HEAD.sub("", text)
+    text = _MD_BOLD.sub(r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-    tmp_dir      = os.path.join(OUTPUT_DIR, "_chandra_tmp")
-    manifest_dir = os.path.join(OUTPUT_DIR, "_chandra_manifest")
-    os.makedirs(tmp_dir, exist_ok=True)
-    os.makedirs(manifest_dir, exist_ok=True)
+def markdown_to_lines(text: str) -> list:
+    lines = []
+    for raw in text.split("\n"):
+        ln = raw.strip()
+        if not ln or re.fullmatch(r"[\-:\s]+", ln):
+            continue
+        ln = re.sub(r"^\|", "", ln).rstrip("|").strip()
+        ln = re.sub(r"\s*\|\s*", "  ", ln)
+        ln = re.sub(r"^[-*]\s+", "", ln)
+        if ln:
+            lines.append(ln)
+    return lines
 
-    # Build manifest: list of {image, out} for the subprocess
-    manifest = []
-    path_to_out = {}
-    for img_path in image_paths:
-        out_path = os.path.join(tmp_dir, f"{uuid.uuid4().hex}.txt")
-        manifest.append({"image": img_path, "out": out_path})
-        path_to_out[img_path] = out_path
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. SPELL CORRECTION  [H3]
+#    Primary : Qwen2.5-7B-Instruct (subprocess via venv)
+#    Fallback: Levenshtein Guard via symspellpy + rapidfuzz
+# ─────────────────────────────────────────────────────────────────────────────
 
-    manifest_path = os.path.join(manifest_dir, f"{uuid.uuid4().hex}_manifest.json")
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f)
+# ── 6a. SymSpell / Levenshtein fallback (runs in main kernel) ────────────────
+_symspell = None
 
-    # Timeout = 120s to load model + 90s per image
-    total_timeout = 120 + (90 * len(image_paths))
-    print(f"  [OCR] Subprocess timeout budget: {total_timeout}s "
-          f"(120s model load + 90s × {len(image_paths)} images)")
-
+def _load_symspell():
+    global _symspell
+    if _symspell is not None:
+        return _symspell
     try:
-        result = subprocess.run(
-            [CHANDRA_VENV_PY, CHANDRA_SCRIPT, "--manifest", manifest_path],
-            capture_output=True,
-            text=True,
-            timeout=total_timeout,   # scales with number of images
+        from symspellpy import SymSpell, Verbosity as _V
+        ss = SymSpell(max_dictionary_edit_distance=2, prefix_length=7)
+        # Use bundled frequency dictionary shipped with symspellpy
+        import symspellpy as _ssp_pkg
+        _dict_path = os.path.join(
+            os.path.dirname(_ssp_pkg.__file__),
+            "frequency_dictionary_en_82_765.txt",
         )
-        if result.returncode != 0:
-            print(f"  ✗ OCR subprocess failed:\n{result.stderr[-800:]}")
-    except subprocess.TimeoutExpired:
-        print(f"  ✗ OCR subprocess timed out after {total_timeout}s")
-
-    # Read results (missing file = OCR failed for that image)
-    results = {}
-    for img_path in image_paths:
-        out_path = path_to_out[img_path]
-        if os.path.exists(out_path):
-            with open(out_path, "r", encoding="utf-8", errors="replace") as f:
-                results[img_path] = f.read()
-            os.remove(out_path)
+        if os.path.exists(_dict_path):
+            ss.load_dictionary(_dict_path, term_index=0, count_index=1)
+            _symspell = ss
+            print("  [SpellCheck] SymSpell dictionary loaded.")
         else:
-            results[img_path] = ""   # failed image gets empty string
+            print("  [SpellCheck] SymSpell dict not found — Levenshtein only.")
+    except Exception as e:
+        print(f"  [SpellCheck] SymSpell load failed: {e}")
+    return _symspell
 
-    # Cleanup
-    if os.path.exists(manifest_path):
-        os.remove(manifest_path)
+def levenshtein_correct(text: str) -> str:
+    """
+    Word-level spelling correction using SymSpell + rapidfuzz.
+    Preserves numbers, Devanagari, and tokens that look like PII.
+    """
+    if not text or has_devanagari(text):
+        return text   # skip Hindi — spell models are English-only
+
+    ss = _load_symspell()
+    if ss is None:
+        return text
+
+    from symspellpy import Verbosity
+    corrected_words = []
+    for word in text.split():
+        # Keep tokens that are: all-caps abbreviations, numbers, emails, PII-like
+        if (re.match(r"^[A-Z]{2,}$", word)
+                or re.match(r"^[\d\W]+$", word)
+                or "@" in word
+                or len(word) <= 2):
+            corrected_words.append(word)
+            continue
+        suggestions = ss.lookup(word, Verbosity.CLOSEST, max_edit_distance=2,
+                                 include_unknown=True)
+        if suggestions:
+            corrected_words.append(suggestions[0].term)
+        else:
+            corrected_words.append(word)
+    return " ".join(corrected_words)
+
+# ── 6b. Qwen2.5-7B-Instruct spell correction (subprocess) ───────────────────
+_QWEN_SPELL_SCRIPT = "/kaggle/working/qwen_spell_script.py"
+
+def _write_qwen_spell_script():
+    """Write the Qwen spell-correction subprocess script once."""
+    script = r'''
+import os, sys, json, argparse
+
+_ENV = "/kaggle/working/chandra_env.env"
+if os.path.isfile(_ENV):
+    for ln in open(_ENV):
+        ln = ln.strip()
+        if "=" in ln and not ln.startswith("#"):
+            k, v = ln.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+_TOKEN = os.environ.get("HF_TOKEN","")
+if _TOKEN:
+    try:
+        from huggingface_hub import login as _l
+        _l(token=_TOKEN, add_to_git_credential=False)
+    except Exception:
+        pass
+
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+MODEL_ID = "Qwen/Qwen2.5-7B-Instruct"
+
+PROMPT_TMPL = (
+    "You are a spelling correction assistant. "
+    "Correct only obvious spelling mistakes in the following text. "
+    "Preserve all numbers, names, dates, account numbers, and medical terms exactly. "
+    "Return ONLY the corrected text, nothing else.\n\nText:\n{text}"
+)
+
+def correct(model, tokenizer, text: str, device: str) -> str:
+    if not text or not text.strip():
+        return text
+    prompt = PROMPT_TMPL.format(text=text[:2000])
+    msgs = [{"role":"user","content":prompt}]
+    inp  = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    toks = tokenizer(inp, return_tensors="pt").to(device)
+    with torch.no_grad():
+        out = model.generate(**toks, max_new_tokens=1024, do_sample=False)
+    generated = out[0][toks["input_ids"].shape[1]:]
+    return tokenizer.decode(generated, skip_special_tokens=True).strip()
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--manifest", required=True)
+    args = ap.parse_args()
+    with open(args.manifest, "r", encoding="utf-8") as f:
+        tasks = json.load(f)
+    if not tasks:
+        sys.exit(0)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype  = torch.float16 if torch.cuda.is_available() else torch.float32
+    print(f"[Qwen] Loading {MODEL_ID} on {device}...", flush=True)
+    kw = dict(torch_dtype=dtype, device_map="auto" if device=="cuda" else None,
+              trust_remote_code=True)
+    if _TOKEN:
+        kw["token"] = _TOKEN
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True,
+                                               token=_TOKEN or None)
+    model     = AutoModelForCausalLM.from_pretrained(MODEL_ID, **kw)
+    if device == "cpu":
+        model = model.to(device)
+    model.eval()
+    print(f"[Qwen] Model loaded.", flush=True)
+
+    for task in tasks:
+        text    = task["text"]
+        out_path= task["out"]
+        try:
+            result = correct(model, tokenizer, text, device)
+        except Exception as e:
+            result = text
+            print(f"[Qwen] correction failed: {e}", file=sys.stderr)
+        os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(result)
+        print(f"[Qwen] ✓ {out_path}", flush=True)
+
+if __name__ == "__main__":
+    main()
+'''
+    with open(_QWEN_SPELL_SCRIPT, "w", encoding="utf-8") as f:
+        f.write(script)
+
+def spell_correct_batch(texts: list) -> list:
+    """
+    [H3] Spell-correct a list of texts.
+    Tries Qwen2.5-7B-Instruct first; falls back to Levenshtein/SymSpell.
+    Returns list of corrected strings (same order as input).
+    """
+    if not texts:
+        return []
+
+    results = [None] * len(texts)
+
+    # ── Try Qwen first ────────────────────────────────────────────────────────
+    _write_qwen_spell_script()
+    TMP = "/kaggle/working/_spell_tmp"
+    MAN = "/kaggle/working/_spell_manifest"
+    os.makedirs(TMP, exist_ok=True)
+    os.makedirs(MAN, exist_ok=True)
+
+    manifest, idx_to_out = [], {}
+    for i, text in enumerate(texts):
+        if not text or has_devanagari(text):
+            results[i] = text   # skip Hindi for Qwen
+            continue
+        out_path = os.path.join(TMP, f"{uuid.uuid4().hex}.txt")
+        manifest.append({"text": text, "out": out_path})
+        idx_to_out[i] = out_path
+
+    qwen_ok = False
+    if manifest:
+        man_path = os.path.join(MAN, f"{uuid.uuid4().hex}.json")
+        with open(man_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
+
+        env = os.environ.copy()
+        try:
+            proc = subprocess.run(
+                [CHANDRA_VENV_PY, _QWEN_SPELL_SCRIPT, "--manifest", man_path],
+                capture_output=True, text=True, timeout=600, env=env,
+            )
+            if proc.returncode == 0:
+                qwen_ok = True
+                for i, out_path in idx_to_out.items():
+                    if os.path.exists(out_path):
+                        with open(out_path, "r", encoding="utf-8") as f:
+                            results[i] = f.read().strip() or texts[i]
+                        os.remove(out_path)
+                    else:
+                        results[i] = None   # will fall back
+            else:
+                print(f"  [Qwen] subprocess failed (exit {proc.returncode}) — "
+                      f"falling back to Levenshtein")
+                if proc.stderr:
+                    print(f"  STDERR: {proc.stderr[-500:]}")
+        except Exception as e:
+            print(f"  [Qwen] subprocess error: {e} — falling back to Levenshtein")
+        try:
+            os.remove(man_path)
+        except Exception:
+            pass
+
+    # ── Levenshtein fallback for anything Qwen didn't handle ─────────────────
+    for i, text in enumerate(texts):
+        if results[i] is None:
+            results[i] = levenshtein_correct(text)
 
     return results
 
-
-def markdown_to_clean_lines(markdown_text: str, max_chars_per_line: int = 200) -> list:
-    """
-    Converts Chandra 2 markdown output to clean, NER-ready text lines.
-    Lines are capped at max_chars_per_line to prevent tokenizer overflow.
-    200 chars is a safer limit for Hindi/Devanagari (more tokens per char).
-    """
-    raw_lines = []
-    for raw in markdown_text.split("\n"):
-        line = raw.strip()
-        if not line:
-            continue
-        # Remove markdown table pipes
-        line = re.sub(r"^\|", "", line)
-        line = re.sub(r"\|$", "", line)
-        line = re.sub(r"\s*\|\s*", "  ", line)
-        # Skip table separator rows (only dashes/colons)
-        if re.fullmatch(r"[\-:\s]+", line):
-            continue
-        # Remove heading markers
-        line = re.sub(r"^#{1,6}\s*", "", line)
-        # Remove list markers
-        line = re.sub(r"^[-*]\s+", "", line)
-        if line:
-            raw_lines.append(line)
-
-    chunked_lines = []
-    for line in raw_lines:
-        if len(line) <= max_chars_per_line:
-            chunked_lines.append(line)
-        else:
-            # Split on sentence boundaries first
-            parts = re.split(r'(?<=[।\.\?\!])\s+', line)
-            current_chunk = ""
-            for part in parts:
-                if len(current_chunk) + len(part) + 1 <= max_chars_per_line:
-                    current_chunk += (" " if current_chunk else "") + part
-                else:
-                    if current_chunk:
-                        chunked_lines.append(current_chunk)
-                    # If a single part is still too long, force-split on spaces
-                    if len(part) > max_chars_per_line:
-                        words = part.split()
-                        sub_chunk = ""
-                        for w in words:
-                            if len(sub_chunk) + len(w) + 1 <= max_chars_per_line:
-                                sub_chunk += (" " if sub_chunk else "") + w
-                            else:
-                                if sub_chunk:
-                                    chunked_lines.append(sub_chunk)
-                                sub_chunk = w
-                        if sub_chunk:
-                            chunked_lines.append(sub_chunk)
-                    else:
-                        current_chunk = part
-            if current_chunk:
-                chunked_lines.append(current_chunk)
-
-    return [l for l in chunked_lines if l.strip()]
-
-
-def is_devanagari(text: str) -> bool:
-    """Returns True if text contains Devanagari Unicode characters."""
-    return bool(re.search(r'[\u0900-\u097F]', text))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. NER PIPELINE LOADING — [FIX-1] CORRECTED
+# 7. PII DETECTION — MODEL-BASED  [H4]
+#    Models: Presidio+RoBERTa, Piiranha, GLiNER-PII
+#    Regex kept as fast pre-filter.
 # ─────────────────────────────────────────────────────────────────────────────
-from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
 
-def load_ner_pipeline(model_id: str):
-    """
-    Loads a HuggingFace NER (token classification) pipeline.
+# ── 7a. Regex pre-filter ──────────────────────────────────────────────────────
+_OCR_FIX = str.maketrans({"O":"0","o":"0","l":"1","I":"1","S":"5","B":"8"})
 
-    ── FIX-1: TypeError Root Cause ──────────────────────────────────────────
-    The original code passed 'truncation=True' and 'padding=True' as kwargs
-    to pipeline(). These are NOT valid parameters for pipeline() itself —
-    they belong to the TOKENIZER at call time.
+def _normalize_digits(text: str) -> str:
+    def _fix(m):
+        r = m.group(0)
+        if sum(c.isdigit() for c in r) >= max(2, len(r)-2):
+            return r.translate(_OCR_FIX)
+        return r
+    return re.sub(r"[\w]{4,}", _fix, text)
 
-    TokenClassificationPipeline._sanitize_parameters() only accepts a specific
-    set of kwargs (like 'ignore_labels', 'aggregation_strategy'). Passing
-    'truncation' raises:
-        TypeError: _sanitize_parameters() got an unexpected keyword argument 'truncation'
+def regex_pii_scan(text: str) -> list:
+    """Returns list of (label, value) from regex patterns."""
+    norm = re.sub(r"(\d{4})\s?(\d{4})\s?(\d{4})", r"\1 \2 \3",
+                  _normalize_digits(text))
+    hits = []
+    found_keys = set()
+    for label, pat in PII_PATTERNS.items():
+        for m in pat.finditer(norm):
+            raw = m.group(0).strip()
+            if raw.upper() in _EXCL_ORGS:
+                continue
+            key = (label, re.sub(r"[\s\-]","",raw).lower())
+            if key not in found_keys:
+                hits.append((label, raw))
+                found_keys.add(key)
+    text_lo = text.lower()
+    for city in INDIAN_CITIES:
+        if city in text_lo:
+            hits.append(("Location", city.title()))
+    return hits
 
-    ── CORRECT APPROACH ─────────────────────────────────────────────────────
-    1. Do NOT pass truncation/padding to pipeline() or pipeline.__call__().
-    2. Set pipe.tokenizer.model_max_length = 512 (controls internal tokenizer limit).
-    3. At inference time, pre-tokenize with truncation=True and pass token IDs,
-       OR rely on the pipeline's internal handling with model_max_length set.
-    4. The safest approach: pre-chunk text to ≤ 200 chars (done in Step 4 above)
-       so that tokenized length never exceeds 512 tokens for typical NER models.
-    """
+# ── 7b. Presidio  ─────────────────────────────────────────────────────────────
+_presidio_analyzer = None
+
+def _load_presidio():
+    global _presidio_analyzer
+    if _presidio_analyzer is not None:
+        return _presidio_analyzer
     try:
-        kwargs = {
-            "task":                 "ner",
-            "model":                model_id,
-            "tokenizer":            model_id,
-            "aggregation_strategy": "first",
-            "device":               DEVICE_ID,
-            "model_kwargs":         {"low_cpu_mem_usage": True},
-            # ── DO NOT add 'truncation' or 'padding' here — causes TypeError ──
-        }
-
-        # Use float16 for GPU to reduce VRAM usage
-        if torch.cuda.is_available():
-            kwargs["torch_dtype"] = torch.float16
-
-        # Pass HF token if available (for gated models like IndicNER)
-        if HF_TOKEN:
-            kwargs["token"] = HF_TOKEN
-
-        pipe = pipeline(**kwargs)
-
-        # ── Set tokenizer limits AFTER pipeline creation (this is correct) ──
-        # model_max_length caps tokenization internally within the pipeline
-        pipe.tokenizer.model_max_length = 512
-        # truncation_side: which end to truncate from if limit exceeded
-        pipe.tokenizer.truncation_side  = "right"
-        # Note: pipe.tokenizer.truncation = True is NOT valid — removed.
-
-        return pipe
-
+        _pip("presidio-analyzer", "presidio-anonymizer", "spacy")
+        subprocess.run([sys.executable, "-m", "spacy", "download",
+                        "en_core_web_lg", "--quiet"], check=False)
+        from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import (
+            NlpEngineProvider, TransformersNlpEngine,
+        )
+        # Use spacy engine — lighter, no GPU needed
+        provider = NlpEngineProvider(nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_lg"}],
+        })
+        nlp_engine = provider.create_engine()
+        _presidio_analyzer = AnalyzerEngine(nlp_engine=nlp_engine,
+                                             supported_languages=["en"])
+        print("  [Presidio] Loaded with spacy en_core_web_lg.")
     except Exception as e:
-        print(f"  ⚠ Failed to load model '{model_id}': {e}")
-        return None
+        print(f"  [Presidio] Load failed: {e}")
+        _presidio_analyzer = None
+    return _presidio_analyzer
 
-
-def clear_memory():
-    """Frees CPU and GPU memory between model loads."""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
-
-
-def safe_delete_pipeline(pipe):
-    """
-    Safely deletes a HuggingFace pipeline and its sub-components.
-    [FIX-2]: Original code used `del pipe.model` which raises AttributeError
-    because TokenClassificationPipeline exposes the model as `pipe.model`
-    only in some versions. We use hasattr guards.
-    """
+def presidio_scan(text: str) -> list:
+    """Returns list of (label, value) from Presidio."""
+    if has_devanagari(text):
+        return []
+    analyzer = _load_presidio()
+    if analyzer is None:
+        return []
     try:
-        if hasattr(pipe, "model"):
-            del pipe.model
-    except Exception:
-        pass
+        results = analyzer.analyze(text=text, language="en")
+        hits, seen = [], set()
+        for r in results:
+            val = text[r.start:r.end].strip()
+            key = (r.entity_type, val.lower())
+            if key not in seen:
+                hits.append((r.entity_type, val))
+                seen.add(key)
+        return hits
+    except Exception as e:
+        print(f"  [Presidio] scan error: {e}")
+        return []
+
+# ── 7c. Piiranha  ─────────────────────────────────────────────────────────────
+_piiranha_pipe = None
+
+def _load_piiranha():
+    global _piiranha_pipe
+    if _piiranha_pipe is not None:
+        return _piiranha_pipe
     try:
-        if hasattr(pipe, "tokenizer"):
-            del pipe.tokenizer
-    except Exception:
-        pass
+        from transformers import pipeline as hf_pipeline
+        _piiranha_pipe = hf_pipeline(
+            "token-classification",
+            model="iiiorg/piiranha-v1-detect-personal-information",
+            aggregation_strategy="simple",
+            device=DEVICE_ID,
+            token=HF_TOKEN or None,
+        )
+        print("  [Piiranha] Loaded.")
+    except Exception as e:
+        print(f"  [Piiranha] Load failed: {e}")
+        _piiranha_pipe = None
+    return _piiranha_pipe
+
+def piiranha_scan(text: str) -> list:
+    """Returns list of (label, value) from Piiranha."""
+    pipe = _load_piiranha()
+    if pipe is None or not text.strip():
+        return []
     try:
-        del pipe
-    except Exception:
-        pass
-    clear_memory()
+        ents = pipe(text[:512])
+        hits, seen = [], set()
+        for e in ents:
+            lbl = e.get("entity_group", e.get("entity","UNKNOWN"))
+            val = e.get("word","").replace("##","").strip()
+            if not val:
+                continue
+            key = (lbl, val.lower())
+            if key not in seen:
+                hits.append((lbl, val))
+                seen.add(key)
+        return hits
+    except Exception as e:
+        print(f"  [Piiranha] scan error: {e}")
+        return []
 
+# ── 7d. GLiNER-PII  ───────────────────────────────────────────────────────────
+_gliner_model = None
+_GLINER_LABELS = [
+    "person","organisation","location","date","phone number",
+    "email address","bank account","aadhaar","pan card",
+    "passport","vehicle number","credit card","address",
+]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. NER + PII INFERENCE — [FIX-2] CORRECTED
-# ─────────────────────────────────────────────────────────────────────────────
-def process_ner_and_pii_for_lines(pipe, lines_data: list, batch_size: int = 16):
+def _load_gliner():
+    global _gliner_model
+    if _gliner_model is not None:
+        return _gliner_model
+    try:
+        _pip("gliner")
+        from gliner import GLiNER
+        _gliner_model = GLiNER.from_pretrained(
+            "urchade/gliner_multi_pii-v1",
+            token=HF_TOKEN or None,
+        )
+        print("  [GLiNER] Loaded.")
+    except Exception as e:
+        print(f"  [GLiNER] Load failed: {e}")
+        _gliner_model = None
+    return _gliner_model
+
+def gliner_scan(text: str) -> list:
+    """Returns list of (label, value) from GLiNER-PII."""
+    model = _load_gliner()
+    if model is None or not text.strip():
+        return []
+    try:
+        ents = model.predict_entities(text[:1000], _GLINER_LABELS, threshold=0.5)
+        hits, seen = [], set()
+        for e in ents:
+            lbl = e.get("label","").upper().replace(" ","_")
+            val = e.get("text","").strip()
+            if not val:
+                continue
+            key = (lbl, val.lower())
+            if key not in seen:
+                hits.append((lbl, val))
+                seen.add(key)
+        return hits
+    except Exception as e:
+        print(f"  [GLiNER] scan error: {e}")
+        return []
+
+# ── 7e. Merge all PII results ─────────────────────────────────────────────────
+def anonymize_value(ptype: str, val: str) -> str:
+    v = val.strip()
+    pt = ptype.upper()
+    if pt == "AADHAAR" or ptype == "Aadhaar":
+        d = re.sub(r"\D","",v)
+        return f"XXXX XXXX {d[-4:]}" if len(d)==12 else "XXXX XXXX XXXX"
+    elif pt == "PAN":
+        c = re.sub(r"\s+","",v)
+        return f"{c[:5]}****{c[-1]}" if len(c)==10 else c[:3]+"*****X"
+    elif "PHONE" in pt or pt=="PHONE_NUMBER":
+        d = re.sub(r"\D","",v)
+        return f"XXXXXX{d[-4:]}" if len(d)>=10 else "XXXXXXXXXX"
+    elif "EMAIL" in pt:
+        if "@" in v:
+            local,domain=v.split("@",1)
+            mk=local[:2]+"*"*max(1,len(local)-2) if len(local)>2 else local[0]+"*"
+            return f"{mk}@{domain}"
+        return "*****@***.com"
+    elif "BANK" in pt or "ACCOUNT" in pt:
+        d = re.sub(r"\D","",v)
+        return "*"*(len(d)-4)+d[-4:] if len(d)>=4 else "XXXXXXXXXXXX"
+    elif "CARD" in pt or "CREDIT" in pt:
+        d = re.sub(r"\D","",v)
+        return f"XXXX-XXXX-XXXX-{d[-4:]}" if len(d)>=16 else "XXXX-XXXX-XXXX-XXXX"
+    elif pt in ("DOB","DATE","DATE_OF_BIRTH"):
+        m = re.search(r"(19|20)\d{2}",v)
+        return f"**/**/{m.group(0)}" if m else "**/**/****"
+    elif "PASSPORT" in pt:
+        c = re.sub(r"\s+","",v)
+        return f"{c[0]}XXXXX{c[-2:]}" if len(c)>=8 else c[0]+"XXXXXX"
+    elif "PERSON" in pt or pt in ("NAME","PER"):
+        parts = v.split()
+        return parts[0][0]+"."+" ".join(p[0]+"." for p in parts[1:]) if parts else "[NAME]"
+    elif "LOCATION" in pt or "ADDRESS" in pt or pt=="LOC":
+        return "[LOCATION REDACTED]"
+    elif "ORGANISATION" in pt or "ORG" in pt:
+        return "[ORG REDACTED]"
+    return "[REDACTED]"
+
+def full_pii_scan(text: str) -> dict:
     """
-    Runs NER inference + regex PII detection on all OCR text lines.
-
-    ── FIX-2 Performance Notes ──────────────────────────────────────────────
-    - batch_size reduced from 64 → 16: prevents VRAM OOM on GPU-T4 (16GB).
-      With 512 tokens × 16 sequences, peak VRAM usage is ~4-6GB for BERT-base.
-    - Text already chunked to ≤200 chars in markdown_to_clean_lines().
-    - Inference wrapped in try/except per batch to handle stray long sequences.
-    - Truncation now handled via pipe.tokenizer.model_max_length (set in loader).
-
-    ── Why NOT pass truncation=True to pipe() ───────────────────────────────
-    pipeline.__call__() for TokenClassificationPipeline passes kwargs through
-    _sanitize_parameters() which only whitelists specific args. 'truncation'
-    is not whitelisted → TypeError. The tokenizer's model_max_length + our
-    text chunking achieves the same safety without any kwargs.
+    [H4] Run regex + Presidio + Piiranha + GLiNER; merge results.
+    Returns dict:
+        detected_pairs  : list of (source, label, value)
+        det_str         : "[Label] value | ..." for audit column
+        anon_str        : "masked | ..." anonymised column
+        found_types     : set of type labels detected
+        detected_values : dict {display_name: [values]}   for [H5]
+        not_detected    : str — display names of types NOT found
     """
+    all_hits = []   # (source, label, value)
+    seen_keys = set()
 
-    PROMPT_STOPWORDS = {
-        "my", "name", "is", "मेरा", "नाम", "है", "and", "at", "the", "in",
-        "by", "or", "to", "was", "were", "और", "ने", "में", "को", "द्वारा",
-        "हैं", "था", "थे", "a", "an", "of", "for",
+    def _add(source, label, value):
+        key = (label.upper(), re.sub(r"[\s\-]","",value).lower())
+        if key not in seen_keys and value.strip():
+            all_hits.append((source, label, value))
+            seen_keys.add(key)
+
+    for label, val in regex_pii_scan(text):
+        _add("Regex", label, val)
+    for label, val in presidio_scan(text):
+        _add("Presidio", label, val)
+    for label, val in piiranha_scan(text):
+        _add("Piiranha", label, val)
+    for label, val in gliner_scan(text):
+        _add("GLiNER", label, val)
+
+    found_types = {lbl.upper() for _, lbl, _ in all_hits}
+
+    # Build display strings
+    if all_hits:
+        det_str  = " | ".join(f"[{lbl}] {val}" for _, lbl, val in all_hits)
+        anon_str = " | ".join(anonymize_value(lbl, val) for _, lbl, val in all_hits)
+    else:
+        det_str  = "None"
+        anon_str = "None"
+
+    # [H5] detected_values: {display_name: [values]}
+    detected_values = {}
+    for _, lbl, val in all_hits:
+        dn = PII_DISPLAY_NAMES.get(lbl, lbl.replace("_"," ").title())
+        detected_values.setdefault(dn, []).append(val)
+
+    # Not-detected: display names of PII_PATTERNS types not found
+    not_det_list = [
+        PII_DISPLAY_NAMES[pt]
+        for pt in PII_PATTERNS
+        if pt.upper() not in found_types and pt not in {lbl for _,lbl,_ in all_hits}
+    ]
+    not_det = ", ".join(not_det_list) if not_det_list else "All PII types detected"
+
+    return {
+        "detected_pairs": all_hits,
+        "det_str":        det_str,
+        "anon_str":       anon_str,
+        "found_types":    found_types,
+        "detected_values":detected_values,
+        "not_detected":   not_det,
     }
 
-    prompts = [item["prompt_text"] for item in lines_data]
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. CHANDRA 2 OCR — sub-batched subprocess
+# ─────────────────────────────────────────────────────────────────────────────
+def run_chandra_ocr_batch(image_paths: list) -> dict:
+    if not image_paths:
+        return {}
+    all_results = {}
+    batches = [image_paths[i:i+IMAGE_BATCH_SIZE]
+               for i in range(0, len(image_paths), IMAGE_BATCH_SIZE)]
+    print(f"  [OCR] {len(image_paths)} images → {len(batches)} sub-batch(es) "
+          f"of ≤{IMAGE_BATCH_SIZE}")
 
-    # ── Batch inference ───────────────────────────────────────────────────────
-    # Note: pipe() handles batching internally when given a list.
-    # We do NOT pass truncation=True here (causes TypeError in older/newer HF).
-    all_raw_outputs = []
-    for start_idx in range(0, len(prompts), batch_size):
-        batch_prompts = prompts[start_idx : start_idx + batch_size]
+    TMP = "/kaggle/working/_chandra_tmp"
+    MAN = "/kaggle/working/_chandra_manifest"
+    os.makedirs(TMP, exist_ok=True)
+    os.makedirs(MAN, exist_ok=True)
+    env = {**os.environ, "HF_TOKEN": HF_TOKEN, "HUGGING_FACE_HUB_TOKEN": HF_TOKEN}
+
+    for bi, batch in enumerate(batches, 1):
+        print(f"  [OCR] Sub-batch {bi}/{len(batches)}: "
+              f"{[os.path.basename(p) for p in batch]}")
+        manifest, p2o = [], {}
+        for img in batch:
+            op = os.path.join(TMP, f"{uuid.uuid4().hex}.txt")
+            manifest.append({"image": img, "out": op})
+            p2o[img] = op
+        mp = os.path.join(MAN, f"{uuid.uuid4().hex}.json")
+        with open(mp, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
         try:
-            batch_out = pipe(batch_prompts)
-            # pipe() on a list returns a list of lists
-            if isinstance(batch_out, list) and len(batch_out) > 0:
-                if isinstance(batch_out[0], dict):
-                    # Single-item batch returned a flat list → wrap it
-                    batch_out = [batch_out]
-            all_raw_outputs.extend(batch_out)
-        except Exception as e:
-            print(f"  ⚠ NER batch [{start_idx}:{start_idx+batch_size}] failed: {e}")
-            # Fill failed batch with empty results to maintain index alignment
-            all_raw_outputs.extend([[] for _ in batch_prompts])
-
-    # ── Per-line result parsing ───────────────────────────────────────────────
-    parsed_types       = []
-    parsed_texts       = []
-    missed_entities_list = []
-    pii_per_type_list    = []   # [FIX-4]: list of dicts, one per line
-    anon_per_type_list   = []   # anonymized values per type per line
-
-    for idx, raw_outputs in enumerate(all_raw_outputs):
-        item        = lines_data[idx]
-        orig_text   = item["original_text"]
-        has_context = item["has_context"]
-
-        extracted_spans = []
-        entity_types    = []
-        detected_words  = set()
-
-        for ent in (raw_outputs or []):
-            group = str(ent.get("entity_group", ent.get("entity", ""))).upper()
-            word  = ent.get("word", "").strip()
-
-            # Normalize entity group labels
-            clean_group = re.sub(r"^[BI]-", "", group)
-            if clean_group in ("PER", "PERSON"):
-                clean_group = "Name"
-            elif clean_group in ("ORG", "ORGANIZATION"):
-                clean_group = "Organization"
-            elif clean_group in ("LOC", "LOCATION"):
-                clean_group = "Location"
-
-            # Clean subword artifacts (## from WordPiece/BPE tokenizers)
-            cleaned_word = re.sub(r"^[\#_\s]+", "", word).strip(",.()\"':;")
-
-            # Skip stopwords in short (no-context) prompts
-            if not has_context and cleaned_word.lower() in PROMPT_STOPWORDS:
-                continue
-
-            if cleaned_word:
-                extracted_spans.append(cleaned_word)
-                entity_types.append(clean_group)
-                for w in cleaned_word.split():
-                    detected_words.add(w.lower().replace(".", "").strip())
-
-        # ── Regex PII scan ────────────────────────────────────────────────────
-        rule_pii_found, rule_pii_anon = scan_pii_rules(orig_text)
-
-        # Merge NER-detected names/orgs/locations into PII dicts
-        ner_pii_found = {pii_type: [] for pii_type in ALL_PII_TYPES}
-        ner_pii_anon  = {pii_type: [] for pii_type in ALL_PII_TYPES}
-
-        for span, etype in zip(extracted_spans, entity_types):
-            if etype in ner_pii_found:
-                ner_pii_found[etype].append(span)
-                ner_pii_anon[etype].append(anonymize_pii(etype, span))
-
-        # Combine regex + NER results (deduplicated per type)
-        combined_found = {}
-        combined_anon  = {}
-        for ptype in ALL_PII_TYPES:
-            combined_values = list(dict.fromkeys(
-                rule_pii_found.get(ptype, []) + ner_pii_found.get(ptype, [])
-            ))
-            combined_anon_vals = list(dict.fromkeys(
-                rule_pii_anon.get(ptype, [])  + ner_pii_anon.get(ptype, [])
-            ))
-            combined_found[ptype] = " | ".join(combined_values) if combined_values else ""
-            combined_anon[ptype]  = " | ".join(combined_anon_vals) if combined_anon_vals else ""
-
-        pii_per_type_list.append(combined_found)
-        anon_per_type_list.append(combined_anon)
-
-        # ── Build output strings ──────────────────────────────────────────────
-        if extracted_spans:
-            final_str = " ".join(extracted_spans)
-            # Edge case: if short prompt, don't echo the entire prompt back
-            if not has_context and orig_text.lower() in final_str.lower():
-                final_str = orig_text
-            parsed_texts.append(final_str)
-            parsed_types.append(" | ".join(entity_types))
-        else:
-            parsed_texts.append("")
-            parsed_types.append("NONE")
-
-        # ── Missed token tracking ─────────────────────────────────────────────
-        words_in_orig = orig_text.split()
-        missed_words  = []
-        for w in words_in_orig:
-            clean_w       = w.strip(",.()\"':;").strip()
-            clean_w_lower = clean_w.lower().replace(".", "")
-            if clean_w_lower in PROMPT_STOPWORDS:
-                continue
-            if clean_w_lower not in detected_words:
-                if not has_context or clean_w[:1].isupper() or is_devanagari(clean_w):
-                    missed_words.append(clean_w)
-        missed_entities_list.append(" | ".join(missed_words) if missed_words else "None")
-
-    return parsed_types, parsed_texts, missed_entities_list, pii_per_type_list, anon_per_type_list
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. MAIN EXECUTION WORKFLOW
-# ─────────────────────────────────────────────────────────────────────────────
-def run_batch_ocr_ner_pipeline(folder_path: str):
-    valid_exts  = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff")
-    image_files = [
-        os.path.join(folder_path, f) for f in sorted(os.listdir(folder_path))
-        if f.lower().endswith(valid_exts)
-    ]
-
-    if not image_files:
-        raise FileNotFoundError(f"No valid image files found in '{folder_path}'.")
-
-    # ── STEP 1: Chandra 2 OCR ─────────────────────────────────────────────────
-    print("=" * 72)
-    print(f"STEP 1 — Running Chandra 2 OCR on {len(image_files)} images")
-    print("=" * 72)
-
-    dataset_master = []
-
-    # REPLACE with:
-    print(f"  Running batch OCR (model loads once for all {len(image_files)} images)...")
-    t_ocr_start = time.time()
-    ocr_results = run_chandra_ocr_batch(image_files)       # ← NEW batch call
-    print(f"  ✓ Batch OCR complete in {time.time() - t_ocr_start:.1f}s")
-    
-    for img_idx, img_path in enumerate(image_files, 1):
-        filename = os.path.basename(img_path)
-        raw_md   = ocr_results.get(img_path, "")
-        lines    = markdown_to_clean_lines(raw_md, max_chars_per_line=200)
-        print(f"  [{img_idx}/{len(image_files)}] {filename}: {len(lines)} line(s)")
-
-        for line_no, clean_line in enumerate(lines, 1):
-            word_count = len(clean_line.split())
-            has_ctx    = word_count > 3 or any(
-                kw in clean_line.lower()
-                for kw in ["is", "are", "live", "lives", "name", "naam", "नाम", "है", "रहते"]
+            proc = subprocess.run(
+                [CHANDRA_VENV_PY, CHANDRA_SCRIPT, "--manifest", mp],
+                capture_output=True, text=True, timeout=600, env=env,
             )
+            if proc.returncode != 0:
+                print(f"  [WARN] Chandra exit {proc.returncode}: {proc.stderr[-500:]}")
+        except subprocess.TimeoutExpired:
+            print(f"  [ERROR] Sub-batch {bi} timed out")
+        except Exception as e:
+            print(f"  [ERROR] Sub-batch {bi}: {e}")
 
-            if not has_ctx:
-                prompt = (
-                    f"मेरा नाम {clean_line} है।"
-                    if is_devanagari(clean_line)
-                    else f"My name is {clean_line}."
-                )
+        for img in batch:
+            op    = p2o[img]
+            fname = os.path.basename(img)
+            if os.path.exists(op):
+                raw = open(op, encoding="utf-8-sig", errors="replace").read().strip()
+                os.remove(op)
+                content = sanitise_ocr(raw)
+                all_results[img] = content if content else f"[OCR EMPTY: {fname}]"
             else:
-                prompt = clean_line
+                all_results[img] = f"[OCR FAILED: {fname}]"
+        try:
+            os.remove(mp)
+        except Exception:
+            pass
+    return all_results
 
-            dataset_master.append({
-                "Image_Name":    filename,
-                "Line_Number":   line_no,
-                "original_text": clean_line,
-                "prompt_text":   prompt,
-                "script":        "Hindi (Devanagari)" if is_devanagari(clean_line) else "English / Transliterated",
-                "has_context":   has_ctx,
-            })
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. NER PIPELINE
+# ─────────────────────────────────────────────────────────────────────────────
+from transformers import pipeline as hf_pipeline
 
-    # if not dataset_master:
-    #     raise ValueError("OCR completed but no text lines were extracted.")
+def load_ner_pipeline(model_id: str):
+    try:
+        kw = dict(task="ner", model=model_id, tokenizer=model_id,
+                  aggregation_strategy="simple", device=DEVICE_ID,
+                  model_kwargs={"low_cpu_mem_usage":True})
+        if torch.cuda.is_available():
+            kw["torch_dtype"] = torch.float16
+        if HF_TOKEN:
+            kw["token"] = HF_TOKEN
+        return hf_pipeline(**kw)
+    except Exception as e:
+        print(f"  ⚠ NER load failed '{model_id}': {e}")
+        return None
 
-    if not dataset_master:
-        print("  ⚠ WARNING: No text lines extracted by OCR. Injecting empty placeholders for downstream evaluation...")
-        for img_path in image_files:
-            filename = os.path.basename(img_path)
-            dataset_master.append({
-                "Image_Name":    filename,
-                "Line_Number":   1,
-                "original_text": "No text detected in image",
-                "prompt_text":   "No text detected in image",
-                "script":        "English / Transliterated",
-                "has_context":   False,
-            })
+def chunk_text(text: str, max_chars=1800, overlap=200) -> list:
+    if len(text) <= max_chars:
+        return [text]
+    chunks, start = [], 0
+    while start < len(text):
+        end = min(start+max_chars, len(text))
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = end - overlap
+    return chunks
 
-    # ── STEP 2: NER + PII benchmark across all models ─────────────────────────
-    print("\n" + "=" * 72)
-    print(f"STEP 2 — NER & PII Benchmark across {len(MODELS)} models")
-    print(f"         Total text lines: {len(dataset_master)}")
-    print("=" * 72)
-
-    # Base DataFrame with OCR results
-    df_details = pd.DataFrame([{
-        "Image_Name":        item["Image_Name"],
-        "Line_Number":       item["Line_Number"],
-        "Extracted_OCR_Text": item["original_text"],
-        "Script":            item["script"],
-    } for item in dataset_master])
-
-    summary_metrics = []
-
-    for model_name, model_id in MODELS.items():
-        print(f"\n▶ Evaluating: {model_name}")
-        pipe = load_ner_pipeline(model_id)
-
-        if pipe is None:
-            print(f"  Skipping {model_name} due to loading error.")
+def run_ner(pipe, text: str) -> dict:
+    buckets = {"PER":[],"ORG":[],"LOC":[],"OTHER":[]}
+    seen    = set()
+    for chunk in chunk_text(text):
+        try:
+            ents = pipe(chunk)
+        except Exception as e:
+            print(f"    [WARN] NER chunk error: {e}")
             continue
+        for e in ents:
+            grp  = str(e.get("entity_group", e.get("entity",""))).upper()
+            word = e.get("word","").strip().replace("##","").strip()
+            if not word or word.upper() in _EXCL_ORGS:
+                continue
+            k = word.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            if grp in ("PER","PERSON","NAME"):  buckets["PER"].append(word)
+            elif grp in ("ORG","ORGANIZATION","ORGANISATION"): buckets["ORG"].append(word)
+            elif grp in ("LOC","LOCATION","GPE","FAC"):        buckets["LOC"].append(word)
+            else:                                              buckets["OTHER"].append(word)
+    return buckets
 
-        pred_types, pred_texts, missed_entities, pii_per_type, anon_per_type = \
-            process_ner_and_pii_for_lines(pipe, dataset_master, batch_size=16)
+def compute_missed(text: str, found_lower: set) -> list:
+    missed, seen = [], set()
+    for w in text.split():
+        cw = re.sub(r"[^\w]","",w)
+        lw = cw.lower()
+        if (len(cw)>3 and w[0].isupper()
+                and lw not in found_lower
+                and w not in _NOISE_TOKENS
+                and lw not in _NOISE_LOWER
+                and lw not in seen):
+            missed.append(cw)
+            seen.add(lw)
+    return missed
 
-        # ── [FIX-4]: Add separate column per PII type for this model ─────────
-        df_details[f"{model_name} | NER_Type"]         = pred_types
-        df_details[f"{model_name} | Detected_Entities"] = pred_texts
-        df_details[f"{model_name} | Missed_Tokens"]    = missed_entities
+# ─────────────────────────────────────────────────────────────────────────────
+# 10. DOCUMENT FILE READER
+# ─────────────────────────────────────────────────────────────────────────────
+def extract_from_file(file_path: str) -> str:
+    """Return full text of a document file as a single string."""
+    ext = os.path.splitext(file_path)[1].lower()
+    lines = []
+    try:
+        if ext in (".html",".htm"):
+            soup = BeautifulSoup(open(file_path,encoding="utf-8",errors="ignore").read(),"html.parser")
+            for el in soup.find_all(["p","div","td","tr","h1","h2","h3","span"]):
+                t = el.get_text(strip=True)
+                if t and len(t)>5:
+                    lines.append(t)
+        elif ext == ".docx":
+            doc = docx.Document(file_path)
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    lines.append(p.text.strip())
+            for table in doc.tables:
+                for row in table.rows:
+                    rt = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
+                    if rt:
+                        lines.append(rt)
+        elif ext == ".pdf":
+            for page in pypdf.PdfReader(file_path).pages:
+                txt = page.extract_text() or ""
+                for ln in txt.split("\n"):
+                    if ln.strip():
+                        lines.append(ln.strip())
+        elif ext == ".txt":
+            for ln in open(file_path,encoding="utf-8",errors="ignore"):
+                if ln.strip():
+                    lines.append(ln.strip())
+    except Exception as e:
+        print(f"  [WARN] Reader error {file_path}: {e}")
+    return "\n".join(lines)
 
-        for ptype in ALL_PII_TYPES:
-            # Raw detected values
-            df_details[f"{model_name} | PII_{ptype}_Detected"] = [
-                row.get(ptype, "") for row in pii_per_type
-            ]
-            # Anonymized values
-            df_details[f"{model_name} | PII_{ptype}_Anonymized"] = [
-                row.get(ptype, "") for row in anon_per_type
-            ]
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. MAIN PIPELINE
+# ─────────────────────────────────────────────────────────────────────────────
+def run_full_pipeline():
+    IMG_EXTS = (".jpg",".jpeg",".png",".bmp",".webp",".tiff")
+    DOC_EXTS = (".html",".htm",".pdf",".docx",".txt")
 
-        # Summary metrics
-        total_lines = len(dataset_master)
-        person_cnt  = sum(1 for t in pred_types if "Name" in t or "PER" in t)
-        loc_cnt     = sum(1 for t in pred_types if "Location" in t or "LOC" in t)
-        org_cnt     = sum(1 for t in pred_types if "Organization" in t or "ORG" in t)
-        none_cnt    = sum(1 for t in pred_types if t == "NONE")
-        pii_hit_cnt = sum(
-            1 for row in pii_per_type
-            if any(v for v in row.values())
-        )
+    all_files = []
+    if os.path.exists(DATASET_FOLDER_PATH):
+        for root,_,files in os.walk(DATASET_FOLDER_PATH):
+            for fname in files:
+                all_files.append(os.path.join(root,fname))
 
-        summary_metrics.append({
-            "Model Name":                        model_name,
-            "Total Text Lines Evaluated":        total_lines,
-            "Detected Names (PER)":              person_cnt,
-            "Detected Locations (LOC)":          loc_cnt,
-            "Detected Organizations (ORG)":      org_cnt,
-            "No Entity Detected (NONE)":         none_cnt,
-            "Lines with Any PII (regex+NER)":    pii_hit_cnt,
-            "Name Detection Rate (%)":           round((person_cnt / total_lines) * 100, 2),
+    image_files = [f for f in all_files if f.lower().endswith(IMG_EXTS)]
+    doc_files   = [f for f in all_files if f.lower().endswith(DOC_EXTS)]
+    print(f"\n▶ STEP 1: {len(image_files)} image(s), {len(doc_files)} document(s)")
+
+    # ── OCR ───────────────────────────────────────────────────────────────────
+    ocr_results = run_chandra_ocr_batch(image_files)
+
+    # ── Build one record per source file  [H1] ────────────────────────────────
+    # Each record: {source_file, file_type, raw_text, is_failed}
+    records = []
+
+    for img_path in image_files:
+        fname    = os.path.basename(img_path)
+        raw_text = ocr_results.get(img_path, f"[OCR FAILED: {fname}]")
+        records.append({
+            "Source_File": fname,
+            "File_Type":   "IMAGE",
+            "Raw_Text":    raw_text,
+            "Is_Failed":   raw_text.startswith("[OCR"),
         })
 
-        safe_delete_pipeline(pipe)
+    for doc_path in doc_files:
+        fname    = os.path.basename(doc_path)
+        raw_text = extract_from_file(doc_path)
+        records.append({
+            "Source_File": fname,
+            "File_Type":   os.path.splitext(fname)[1].upper().replace(".",""),
+            "Raw_Text":    raw_text if raw_text.strip() else f"[EMPTY: {fname}]",
+            "Is_Failed":   not raw_text.strip(),
+        })
 
-    df_summary = pd.DataFrame(summary_metrics)
+    print(f"  Records: {len(records)} total")
 
-    # ── STEP 3: Build PII-only summary sheet (aggregated across all lines) ────
-    print("\n" + "=" * 72)
-    print("STEP 3 — Building PII Aggregation Sheet")
-    print("=" * 72)
+    # ── STEP 2: Spell correction  [H3] ────────────────────────────────────────
+    print("\n▶ STEP 2: Spell correction (Qwen2.5-7B → Levenshtein fallback)...")
+    raw_texts      = [r["Raw_Text"] for r in records]
+    corrected_texts = spell_correct_batch(raw_texts)
+    for i, r in enumerate(records):
+        r["Corrected_Text"] = corrected_texts[i] if not r["Is_Failed"] else r["Raw_Text"]
 
-    # One row per image: aggregate all detected PII across lines
-    pii_agg_rows = []
-    for img_file in sorted(df_details["Image_Name"].unique()):
-        img_df  = df_details[df_details["Image_Name"] == img_file]
-        agg_row = {"Image_Name": img_file}
-        for model_name in MODELS.keys():
-            for ptype in ALL_PII_TYPES:
-                det_col  = f"{model_name} | PII_{ptype}_Detected"
-                anon_col = f"{model_name} | PII_{ptype}_Anonymized"
-                if det_col in img_df.columns:
-                    all_det  = " | ".join(v for v in img_df[det_col].dropna() if v)
-                    all_anon = " | ".join(v for v in img_df[anon_col].dropna() if v)
-                    agg_row[f"{model_name} | {ptype} (Detected)"]   = all_det
-                    agg_row[f"{model_name} | {ptype} (Anonymized)"] = all_anon
-        pii_agg_rows.append(agg_row)
+    # ── STEP 3: Language detection  [H2] ──────────────────────────────────────
+    print("\n▶ STEP 3: Language detection...")
+    for r in records:
+        r["Language"] = detect_language(r["Raw_Text"])
+    lang_counts = {}
+    for r in records:
+        lang_counts[r["Language"]] = lang_counts.get(r["Language"],0)+1
+    print(f"  Languages: {lang_counts}")
 
-    df_pii_agg = pd.DataFrame(pii_agg_rows)
+    # ── STEP 4: PII detection → Sheet 3  [H4] [H5] ───────────────────────────
+    print("\n▶ STEP 4: PII Detection (Regex + Presidio + Piiranha + GLiNER)...")
+    sheet3_rows    = []
+    files_with_pii = 0
 
-    # ── STEP 4: Export to Excel ────────────────────────────────────────────────
-    print("\n" + "=" * 72)
-    print("STEP 4 — Exporting Complete Benchmark Report to Excel")
-    print("=" * 72)
+    for r in records:
+        if r["Is_Failed"]:
+            sheet3_rows.append({
+                "Source_File":            r["Source_File"],
+                "File_Type":              r["File_Type"],
+                "Language":               r["Language"],
+                "Full_Extracted_Text":    r["Raw_Text"],
+                "Spell_Corrected_Text":   r["Raw_Text"],
+                "Detected_PII_With_Tags": "OCR Failed",
+                "Anonymized_PII_Output":  "OCR Failed",
+                "PII_Types_Detected":     "N/A",
+                "PII_Types_Not_Detected": "N/A",
+            })
+            continue
 
+        pii = full_pii_scan(r["Corrected_Text"])
+        if pii["det_str"] != "None":
+            files_with_pii += 1
+
+        # [H5] PII_Types_Detected: "Type: val1, val2 | Type2: val3"
+        if pii["detected_values"]:
+            det_vals_str = " | ".join(
+                f"{dn}: {', '.join(vs)}"
+                for dn, vs in pii["detected_values"].items()
+            )
+        else:
+            det_vals_str = "None"
+
+        sheet3_rows.append({
+            "Source_File":            r["Source_File"],
+            "File_Type":              r["File_Type"],
+            "Language":               r["Language"],
+            "Full_Extracted_Text":    r["Raw_Text"],
+            "Spell_Corrected_Text":   r["Corrected_Text"],
+            "Detected_PII_With_Tags": pii["det_str"],
+            "Anonymized_PII_Output":  pii["anon_str"],
+            "PII_Types_Detected":     det_vals_str,
+            "PII_Types_Not_Detected": pii["not_detected"],
+        })
+
+    df_sheet3 = pd.DataFrame(sheet3_rows)
+    print(f"  Files with PII: {files_with_pii}/{len(records)}")
+
+    # ── STEP 5: NER Comparison → Sheet 2  [H1][H6] ───────────────────────────
+    print("\n▶ STEP 5: NER Models — Comparison (Sheet 2)...")
+
+    # Base columns (one row per file)
+    sheet2_base = []
+    for r in records:
+        regex_names = INDIAN_TITLE_REGEX.findall(r["Corrected_Text"])
+        sheet2_base.append({
+            "Source_File":          r["Source_File"],
+            "File_Type":            r["File_Type"],
+            "Language":             r["Language"],
+            "Full_Extracted_Text":  r["Raw_Text"],
+            "Spell_Corrected_Text": r["Corrected_Text"],
+            "Regex_Detected_Names": " | ".join(regex_names) if regex_names else "None",
+        })
+
+    # Per-model columns appended in-place
+    summary_rows = []
+
+    for short_name, model_id in NER_MODELS.items():
+        print(f"  ── {short_name} ({model_id}) ──")
+        pipe = load_ner_pipeline(model_id)
+
+        col_type   = f"{short_name}_Predicted_Type"
+        col_entity = f"{short_name}_Extracted_Text"
+        col_missed = f"{short_name}_Missed_Entities"
+
+        files_names = 0
+        files_org   = 0
+        files_loc   = 0
+        total_names = 0
+
+        for i, r in enumerate(records):
+            text = r["Corrected_Text"]
+
+            if r["Is_Failed"] or pipe is None:
+                sheet2_base[i][col_type]   = "Load Failed" if pipe is None else "OCR Failed"
+                sheet2_base[i][col_entity] = "N/A"
+                sheet2_base[i][col_missed] = "N/A"
+                continue
+
+            buckets = run_ner(pipe, text)
+
+            # Merge regex + NER PER
+            raw_regex  = [n.strip() for n in sheet2_base[i]["Regex_Detected_Names"].split(" | ")
+                          if n.strip() and n.strip() != "None"]
+            seen_names = set()
+            all_names  = []
+            for nm in raw_regex + buckets["PER"]:
+                k = nm.lower()
+                if k and k not in seen_names and nm.upper() not in _EXCL_ORGS:
+                    all_names.append(nm)
+                    seen_names.add(k)
+
+            all_found_lower = (
+                {n.lower() for n in all_names}
+                | {n.lower() for n in buckets["ORG"]}
+                | {n.lower() for n in buckets["LOC"]}
+            )
+            missed = compute_missed(text, all_found_lower)
+
+            type_parts, entity_parts = [], []
+            if all_names:
+                type_parts.append("PER")
+                entity_parts.append("PER: " + " | ".join(all_names))
+                files_names += 1
+                total_names += len(all_names)
+            if buckets["ORG"]:
+                type_parts.append("ORG")
+                entity_parts.append("ORG: " + " | ".join(buckets["ORG"]))
+                files_org += 1
+            if buckets["LOC"]:
+                type_parts.append("LOC")
+                entity_parts.append("LOC: " + " | ".join(buckets["LOC"]))
+                files_loc += 1
+
+            sheet2_base[i][col_type]   = ", ".join(type_parts) if type_parts else "None"
+            sheet2_base[i][col_entity] = " || ".join(entity_parts) if entity_parts else "None"
+            sheet2_base[i][col_missed] = " | ".join(missed) if missed else "None"
+
+        rate = round(files_names / max(len(records),1) * 100, 2)
+        summary_rows.append({
+            "Model Name":              f"{short_name} ({model_id})",
+            "Total Files Processed":   len(records),
+            "Files with Names (PER)":  files_names,
+            "Total Names Found":       total_names,
+            "Files with ORG":          files_org,
+            "Files with LOC":          files_loc,
+            "Files with PII":          files_with_pii,
+            "Name Detection Rate %":   rate,
+        })
+
+        if pipe is not None:
+            del pipe
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    df_sheet2 = pd.DataFrame(sheet2_base)
+
+    # ── STEP 6: Model Summary → Sheet 1 ──────────────────────────────────────
+    print("\n▶ STEP 6: Building Sheet 1 (Model Summary)...")
+    df_sheet1 = pd.DataFrame(summary_rows)
+
+    # ── STEP 7: Export to Excel ───────────────────────────────────────────────
+    print("\n▶ STEP 7: Writing Excel Report...")
     with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
-        # Sheet 1: Model comparison summary
-        df_summary.to_excel(
-            writer, sheet_name="Model Comparison Summary", index=False
-        )
-        # Sheet 2: Line-level OCR + NER + per-PII-type columns
-        df_details.to_excel(
-            writer, sheet_name="OCR & NER Line Details", index=False
-        )
-        # Sheet 3: Per-image PII aggregation with anonymization
-        df_pii_agg.to_excel(
-            writer, sheet_name="PII Aggregated by Image", index=False
-        )
+        df_sheet1.to_excel(writer, sheet_name="Model Summary",        index=False)
+        df_sheet2.to_excel(writer, sheet_name="OCR NER Comparison",   index=False)
+        df_sheet3.to_excel(writer, sheet_name="PII Detection Tagged",  index=False)
 
-    print(f"\n✓ Excel report saved: '{OUTPUT_EXCEL}'")
-    print(f"  Sheets: 'Model Comparison Summary' | 'OCR & NER Line Details' | 'PII Aggregated by Image'")
-    return df_summary, df_details, df_pii_agg
+        from openpyxl.styles import PatternFill, Font, Alignment
+        from openpyxl.utils  import get_column_letter
 
+        H_FILL  = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+        H_FONT  = Font(color="FFFFFF", bold=True, size=10)
+        E_FILL  = PatternFill(start_color="EBF3FB", end_color="EBF3FB", fill_type="solid")
+        PII_F   = PatternFill(start_color="FFE0E0", end_color="FFE0E0", fill_type="solid")
+        ANON_F  = PatternFill(start_color="E0F7E0", end_color="E0F7E0", fill_type="solid")
+        LANG_F  = PatternFill(start_color="FFF3CD", end_color="FFF3CD", fill_type="solid")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EXECUTE
-# ─────────────────────────────────────────────────────────────────────────────
+        for sname in writer.sheets:
+            ws = writer.sheets[sname]
+            for cell in ws[1]:
+                cell.fill      = H_FILL
+                cell.font      = H_FONT
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+            for col_idx, col_cells in enumerate(ws.columns, 1):
+                hdr = str(col_cells[0].value or "")
+                col_letter = get_column_letter(col_idx)
+                max_len = max((len(str(c.value)) for c in col_cells if c.value), default=10)
+                ws.column_dimensions[col_letter].width = min(max_len+4, 60)
+
+                for row_idx, cell in enumerate(col_cells[1:], 2):
+                    val = str(cell.value or "")
+                    if any(k in hdr for k in ("PII","Detected","Anonymized")):
+                        if val not in ("None","OCR Failed","N/A","All PII types detected"):
+                            cell.fill = PII_F
+                    elif "Anonymized" in hdr:
+                        if val not in ("None","OCR Failed","N/A"):
+                            cell.fill = ANON_F
+                    elif hdr == "Language":
+                        cell.fill = LANG_F
+                    elif row_idx % 2 == 0:
+                        if (cell.fill is None
+                                or cell.fill.fill_type is None
+                                or cell.fill.fill_type == "none"):
+                            cell.fill = E_FILL
+
+            ws.freeze_panes = "A2"
+            ws.row_dimensions[1].height = 28
+
+    print(f"\n✅ DONE — Output: {OUTPUT_EXCEL}")
+    print(f"   Sheet 1: Model Summary          ({len(summary_rows)} models)")
+    print(f"   Sheet 2: OCR NER Comparison     ({len(df_sheet2)} rows — 1 per file)")
+    print(f"   Sheet 3: PII Detection Tagged   ({len(df_sheet3)} rows — 1 per file)")
+
 if __name__ == "__main__":
-    df_summary, df_details, df_pii_agg = run_batch_ocr_ner_pipeline(IMAGE_FOLDER_PATH)
-
-    print("\n=== BENCHMARK SUMMARY MATRIX ===")
-    print(df_summary.to_string(index=False))
+    run_full_pipeline()
