@@ -6,17 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install essential system dependencies for OpenCV, PyTorch, and build tools
+# Install essential build tools and dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     curl \
-    python3-venv \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory inside container
@@ -26,28 +20,20 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install main application Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-build isolated virtual environment for Chandra 2 OCR engine
-RUN python3 -m venv /app/chandra_venv && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir --upgrade pip && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir "transformers>=4.40,<5.0" "chandra-ocr[hf]" "pillow>=10.0" "accelerate>=0.26"
+# Pre-download spaCy English model for Presidio NLP engine
+RUN python -m spacy download en_core_web_lg --quiet
 
-# Create directories for data inputs and outputs
-RUN mkdir -p /app/data/source_images /app/output
+# Create input and output directories
+RUN mkdir -p /app/data /app/output
 
 # Copy application source code
 COPY app/ ./app/
 
 # Environment Variables
-ENV BASE_DIR=/app \
-    IMAGE_FOLDER_PATH=/app/data/source_images \
-    OUTPUT_DIR=/app/output \
-    CHANDRA_VENV=/app/chandra_venv \
-    CHANDRA_VENV_PY=/app/chandra_venv/bin/python \
-    CHANDRA_SCRIPT=/app/chandra_infer_script.py
+ENV HF_TOKEN=""
 
-# Command to execute setup and main batch anonymization pipeline
-CMD ["sh", "-c", "python app/chandra2_setup.py && python app/main.py"]
+# Default command to run the PII & NER Pipeline
+CMD ["python", "app/main.py", "--input", "/app/data", "--output", "/app/output/pii_ner_report.xlsx"]
