@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  PIPELINE.PY — TXT → PII Detection → NER Comparison → Excel Report           ║
+# ║  PIPELINE.PY — Line-by-Line PII Detection & NER Comparison Pipeline          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from openpyxl.utils import get_column_letter
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION & DICTIONARIES
+# DEFAULT PATHS & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_INPUT_PATH  = "/kaggle/input/datasets/gogul0604/text-dataset"
+DEFAULT_INPUT_PATH  = "/kaggle/input/datasets/gogul0604/test-dataset"
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
 
 DEVICE_ID  = 0 if torch.cuda.is_available() else -1
@@ -63,20 +63,32 @@ PII_DISPLAY_NAMES: Dict[str, str] = {
     "Pincode":         "ZIP / Pin Code",
 }
 
-# Expanded Haryana Cities & Administrative Locations
-INDIAN_CITIES = [
-    "karnal", "jhajjar", "vpo subana", "subana", "rohtak", "gurugram", "gurgaon",
-    "faridabad", "hisar", "panipat", "sonipat", "ambala", "panchkula", "yamunanagar",
-    "kurukshetra", "bhiwani", "sirsa", "jind", "fatehabad", "rewari", "mewat", "nuh",
-    "palwal", "charkhi dadri", "kaithal", "bahadurgarh", "gohana", "hansi",
-    "district administrative complex", "sector 12", "ward no. 8", "ward block office",
-    "haryana", "punjab", "delhi", "new delhi", "bengaluru", "bangalore", "mumbai",
-    "chennai", "kolkata", "hyderabad", "pune", "ahmedabad", "jaipur", "lucknow"
+# Comprehensive Database of Indian Cities, Regions, & Administrative Locations
+LOCATIONS_DB = [
+    # States
+    "andhra pradesh", "telangana", "haryana", "punjab", "delhi", "new delhi", "karnataka", "tamil nadu", "maharashtra",
+    "a.p.", "ap", "ts",
+    # Cities / Regions in TS/AP
+    "hyderabad", "hyd", "hyderabad-east", "kukatpally", "ranga reddy", "ranga reddy district", "champapet", "santosh nagar",
+    "maruthi nagar", "vivekananda nagar colony", "vivekananda nagar", "secunderabad", "gachibowli", "jubilee hills",
+    # Cities / Regions in Haryana / North India
+    "karnal", "jhajjar", "vpo subana", "subana", "rohtak", "gurugram", "gurgaon", "faridabad", "hisar", "panipat",
+    "sonipat", "ambala", "panchkula", "yamunanagar", "kurukshetra", "bhiwani", "sirsa", "jind", "fatehabad",
+    "district administrative complex", "sector 12", "ward no. 8", "ward block office", "local ward office"
 ]
-# Sort longer terms first to match full phrases before single words
-INDIAN_CITIES.sort(key=len, reverse=True)
+LOCATIONS_DB.sort(key=len, reverse=True)
 
-# Common document noise words to ignore in Missed Entities computation
+HONORIFICS = r"(?:Shri|Sri|Smt\.?|Mr\.?|Mrs\.?|Ms\.?|Miss|Master|Dr\.?|Prof\.?|Shrimati|Late|SHRI|SRI|SMT\.?|MR\.?|MRS\.?|MS\.?|MISS|MASTER|DR\.?|PROF\.?|LATE)"
+
+EXCLUDE_NAME_WORDS = {
+    "LETTER", "COMPLAINT", "GRIEVANCE", "FORMAL", "DOCUMENT", "DEED", "NOTICE", "REPORT",
+    "VENDOR", "OFFICE", "OFFICER", "COMMISSIONER", "COMPLEX", "ACADEMY", "COLLEGE", "UNIVERSITY",
+    "HOSPITAL", "DEPARTMENT", "MINISTRY", "FOUNDATION", "AUTHORITY", "REGISTERED", "AGREEMENT",
+    "PRINCIPAL", "HOLDER", "HOLDERS", "OCCUPATION", "HOUSEHOLD", "BUSINESS", "A.S.G.P.A", "G.P.A",
+    "S.R.O", "BOOK", "A.P.", "T.S.", "AP", "TS", "HYD", "HYDERABAD", "KARNAL", "JHAJJAR",
+    "DEED OF SALE", "SALE DEED", "ANDHRA PRADESH", "TELANGANA", "YOURS", "FAITHFULLY", "SINCERELY"
+}
+
 DOC_COMMON_WORDS = {
     "FORMAL", "GRIEVANCE", "COMPLAINT", "LETTER", "OFFICER", "OFFICE", "DEPUTY", "COMMISSIONER",
     "ADMINISTRATIVE", "COMPLEX", "SECTOR", "SUBJECT", "URGENT", "REGARDING", "NON-DISBURSEMENT",
@@ -134,7 +146,7 @@ class FileRecord:
 
 def read_txt(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as fh:
-        # Normalize carriage returns to prevent pandas/openpyxl output write bugs
+        # Normalize carriage returns to prevent openpyxl/pandas write issues
         return fh.read().replace("\r\n", "\n").replace("\r", "\n").strip()
 
 def collect_txt_files(input_path: str) -> List[str]:
@@ -175,91 +187,129 @@ def detect_language(text: str) -> str:
     return "Unknown"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PII REGEX SCANNER WITH CONTEXT-AWARE DISAMBIGUATION
+# LINE-BY-LINE PII & NAME SCANNER
 # ─────────────────────────────────────────────────────────────────────────────
-HONORIFIC_NAME_RE = re.compile(
-    r"\b(?:Shri|Sri|Smt\.?|Mr\.?|Mrs\.?|Ms\.?|Miss|Master|Dr\.?|Prof\.?|Shrimati)\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}\b"
-    r"|"
-    r"\b[A-Z][a-zA-Z]+\s+(?:Kumar|Kumari)\b",
-    re.UNICODE
-)
-
-def regex_pii_scan(text: str) -> List[PiiHit]:
+def scan_text_line_by_line(text: str) -> List[PiiHit]:
     hits: List[PiiHit] = []
-    seen_spans: set = set()
+    lines = text.splitlines()
 
-    def _is_span_free(start, end):
-        return not any(s <= start < e or s < end <= e for s, e in seen_spans)
+    for line_idx, line in enumerate(lines):
+        line_str = line.strip()
+        if not line_str:
+            continue
 
-    def _add_hit(source, label, val, start, end):
-        if _is_span_free(start, end) and val:
-            hits.append(PiiHit(source, label, val, PII_DISPLAY_NAMES.get(label, label)))
-            seen_spans.add((start, end))
+        # ── PASS 1: Contextual & Specific PII Patterns ──
+        # Email Address
+        for m in re.finditer(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", line_str):
+            hits.append(PiiHit("Regex", "Email", m.group(0).strip(), PII_DISPLAY_NAMES["Email"]))
 
-    # ── PASS 1: Contextual Labeled Expressions (Prevents Aadhaar/Bank/PPP collisions) ──
-    # User ID / Portal ID
-    for m in re.finditer(r"(?:User\s*ID(?:\s*\([^)]+\))?|UserId|Username|User_ID|Portal\s*ID)[_\-:\s]+([a-zA-Z0-9_\-]+)", text, re.I):
-        _add_hit("Contextual Regex", "User_ID", m.group(1).strip(), m.start(1), m.end(1))
+        # Credit Card (16 digits starting with 4, 5, 3, 6)
+        for m in re.finditer(r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6011)[\s\-]?(?:\d{4}[\s\-]?){2}\d{4}\b", line_str):
+            hits.append(PiiHit("Regex", "Credit_Card", m.group(0).strip(), PII_DISPLAY_NAMES["Credit_Card"]))
 
-    # PPP ID (Parivar Pehchan Patra)
-    for m in re.finditer(r"(?:PPP\s*ID|PPP|FAMILY\s*ID|Parivar\s*Pehchan\s*Patra)[_\-:\s\(\)]*([A-Z0-9]{6,10})", text, re.I):
-        _add_hit("Contextual Regex", "PPP_ID", m.group(1).strip(), m.start(1), m.end(1))
+        # Driving License (e.g. HR-0620150012345)
+        for m in re.finditer(r"\b[A-Z]{2}[\-\s]?\d{2,4}[\-\s]?\d{6,11}\b", line_str):
+            val = m.group(0).strip()
+            if not re.match(r"^[A-Z]{5}\d{4}[A-Z]$", val) and not re.match(r"^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$", val):
+                hits.append(PiiHit("Regex", "Driving_License", val, PII_DISPLAY_NAMES["Driving_License"]))
 
-    # Labeled Bank Account Number
-    for m in re.finditer(r"(?:Bank\s*Account(?:\s*Number|\s*No)?|SBI\s*Account|Account\s*No|Account\s*Number)[_\-:\s]*(\d{9,18})", text, re.I):
-        _add_hit("Contextual Regex", "Bank_Account", m.group(1).strip(), m.start(1), m.end(1))
+        # PAN Card
+        for m in re.finditer(r"\b[A-Z]{5}\d{4}[A-Z]\b", line_str):
+            hits.append(PiiHit("Regex", "PAN", m.group(0).strip(), PII_DISPLAY_NAMES["PAN"]))
 
-    # Labeled Driving License
-    for m in re.finditer(r"(?:Driving\s*License|DL\s*No)[^\n]*?\b([A-Z]{2}[\-\s]?\d{2,4}[\-\s]?\d{6,11})\b", text, re.I):
-        _add_hit("Contextual Regex", "Driving_License", m.group(1).strip(), m.start(1), m.end(1))
+        # Vehicle Registration Number
+        for m in re.finditer(r"\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b", line_str):
+            hits.append(PiiHit("Regex", "Vehicle_Number", m.group(0).strip(), PII_DISPLAY_NAMES["Vehicle_Number"]))
 
-    # Labeled Aadhaar Card
-    for m in re.finditer(r"(?:Aadhaar|Aadhar|UIDAI)[^\n\d]*([2-9]\d{3}[\s\-]?\d{4}[\s\-]?\d{4})", text, re.I):
-        _add_hit("Contextual Regex", "Aadhaar", m.group(1).strip(), m.start(1), m.end(1))
+        # Voter ID
+        for m in re.finditer(r"\b(?:[A-Z]{3}\d{7}|[A-Z]{2}\/\d{2}\/\d{3}\/\d{6})\b", line_str):
+            hits.append(PiiHit("Regex", "Voter_ID", m.group(0).strip(), PII_DISPLAY_NAMES["Voter_ID"]))
 
-    # ── PASS 2: Standard Unlabelled Pattern Scanning ──────────────────────────
-    patterns = [
-        ("Email",           r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
-        ("Credit_Card",     r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6011)[\s\-]?(?:\d{4}[\s\-]?){2}\d{4}\b"),
-        ("PAN",             r"\b[A-Z]{5}\d{4}[A-Z]\b"),
-        ("Aadhaar",         r"\b[2-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}\b"),
-        ("Voter_ID",        r"\b(?:[A-Z]{3}\d{7}|[A-Z]{2}\/\d{2}\/\d{3}\/\d{6})\b"),
-        ("Passport",        r"\b[A-PR-WY][1-9]\d{7}\b"),
-        ("Vehicle_Number",  r"\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b"),
-        ("Phone_Number",    r"\b(?:\+?91[\s\-]?)?[6-9]\d{9}\b"),
-        ("IP_Address",      r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"),
-        ("IFSC_Code",       r"\b[A-Z]{4}0[A-Z0-9]{6}\b"),
-        ("DOB",             r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}\b"),
-        ("Pincode",         r"\b[1-9][0-9]{5}\b"),
-        ("Bank_Account",    r"(?<!\d)\d{11,18}(?!\d)"),
-    ]
+        # Passport Number
+        for m in re.finditer(r"\b[A-PR-WY][1-9]\d{7}\b", line_str):
+            hits.append(PiiHit("Regex", "Passport", m.group(0).strip(), PII_DISPLAY_NAMES["Passport"]))
 
-    for label, pat in patterns:
-        for m in re.finditer(pat, text):
-            _add_hit("Regex", label, m.group(0).strip(), m.start(), m.end())
+        # User ID / Portal ID
+        for m in re.finditer(r"(?:User\s*ID(?:\s*\([^)]+\))?|UserId|Username|User_ID|Portal\s*ID)[_\-:\s]+([a-zA-Z0-9_\-]+)", line_str, re.I):
+            hits.append(PiiHit("Contextual Regex", "User_ID", m.group(1).strip(), PII_DISPLAY_NAMES["User_ID"]))
 
-    # ── PASS 3: Haryana & Indian Locations ──────────────────────────────────
-    for loc in INDIAN_CITIES:
-        for m in re.finditer(r"\b" + re.escape(loc) + r"\b", text, re.I):
-            _add_hit("Regex", "Location", m.group(0).strip().title(), m.start(), m.end())
+        # PPP ID (Parivar Pehchan Patra)
+        for m in re.finditer(r"(?:PPP\s*ID|PPP|FAMILY\s*ID|Parivar\s*Pehchan\s*Patra)[_\-:\s\(\)]*([A-Z0-9]{6,10})", line_str, re.I):
+            hits.append(PiiHit("Contextual Regex", "PPP_ID", m.group(1).strip(), PII_DISPLAY_NAMES["PPP_ID"]))
 
-    # ── PASS 4: Person Names with Titles/Honorifics ───────────────────────────
-    for m in HONORIFIC_NAME_RE.finditer(text):
-        _add_hit("Regex", "PERSON", m.group(0).strip(), m.start(), m.end())
+        # Bank Account Number
+        for m in re.finditer(r"(?:Bank\s*Account(?:\s*Number|\s*No)?|SBI\s*Account|Account\s*No|Account\s*Number)[_\-:\s]*(\d{9,18})", line_str, re.I):
+            hits.append(PiiHit("Contextual Regex", "Bank_Account", m.group(1).strip(), PII_DISPLAY_NAMES["Bank_Account"]))
 
-    return hits
+        # Aadhaar Card (12 digits with strict boundaries)
+        for m in re.finditer(r"(?<!\d[\s\-])\b[2-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}\b(?!\d|[\s\-]\d)", line_str):
+            hits.append(PiiHit("Regex", "Aadhaar", m.group(0).strip(), PII_DISPLAY_NAMES["Aadhaar"]))
+
+        # IFSC Code
+        for m in re.finditer(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", line_str):
+            hits.append(PiiHit("Regex", "IFSC_Code", m.group(0).strip(), PII_DISPLAY_NAMES["IFSC_Code"]))
+
+        # IP Address
+        for m in re.finditer(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", line_str):
+            hits.append(PiiHit("Regex", "IP_Address", m.group(0).strip(), PII_DISPLAY_NAMES["IP_Address"]))
+
+        # Phone Number
+        for m in re.finditer(r"(?:Phone|Mobile|Contact|Cell|Tel|Primary\s*Contact)?[^\n\d]*\b(\+91[\s\-]?[6-9]\d{9}|[6-9]\d{9})\b", line_str, re.I):
+            val = m.group(1).strip()
+            if "account" not in line_str.lower() and "pension" not in line_str.lower():
+                hits.append(PiiHit("Regex", "Phone_Number", val, PII_DISPLAY_NAMES["Phone_Number"]))
+
+        # DOB / Dates
+        for m in re.finditer(r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}\b", line_str):
+            hits.append(PiiHit("Regex", "DOB", m.group(0).strip(), PII_DISPLAY_NAMES["DOB"]))
+        for m in re.finditer(r"\b\d{1,2}(?:st|nd|rd|th)?\s+(?:day\s+of\s+)?(?:January|February|March|April|May|June|July|August|September|October|November|December),?\s+(?:19|20)\d{2}\b", line_str, re.I):
+            hits.append(PiiHit("Regex", "DOB", m.group(0).strip(), PII_DISPLAY_NAMES["DOB"]))
+
+        # Pincode
+        for m in re.finditer(r"\b[1-9][0-9]{2}\s?[0-9]{3}\b", line_str):
+            val = m.group(0).strip()
+            if not val.startswith("200") and not val.startswith("201") and "voter" not in line_str.lower():
+                hits.append(PiiHit("Regex", "Pincode", val, PII_DISPLAY_NAMES["Pincode"]))
+
+        # ── PASS 2: Locations & Cities ──
+        for loc in LOCATIONS_DB:
+            for m in re.finditer(r"\b" + re.escape(loc) + r"\b", line_str, re.I):
+                hits.append(PiiHit("Regex", "Location", m.group(0).strip().title(), PII_DISPLAY_NAMES["Location"]))
+
+        # ── PASS 3: Person Names (Relational & Line Parsing) ──
+        line_clean_for_name = line_str
+        for prefix in ["Sold To", "For whom", "Complainant Name:", "Complainant Name", "Father's/Affected Name:", "Father's Name:"]:
+            if line_clean_for_name.lower().startswith(prefix.lower()):
+                line_clean_for_name = line_clean_for_name[len(prefix):].strip(" :-.,'")
+
+        line_parts = re.split(r"\s*(?:\b(?:s/o|w/o|d/o|c/o|r/o|S/o|W/o|D/o|C/o|R/o|S/O|W/O|D/O|C/O|R/O)\.?)[\s\.:]*", line_clean_for_name)
+        
+        for part in line_parts:
+            part_str = part.strip()
+            part_str = re.sub(r"\s+(?:is|aged|Occupation|Household|Business|Holders|Both|Rpresented).*$", "", part_str, flags=re.I).strip(" :-.,'")
+
+            for m in re.finditer(fr"\b{HONORIFICS}\s+(?:[A-Z]\.\s*)*[A-Za-z]+(?:\s+[A-Za-z]+){{0,3}}\b", part_str):
+                c_val = m.group(0).strip(" :-.,'")
+                if len(c_val) > 3 and not any(w in c_val.upper() for w in EXCLUDE_NAME_WORDS):
+                    hits.append(PiiHit("Regex", "PERSON", c_val, PII_DISPLAY_NAMES["PERSON"]))
+
+            if part_str and re.match(r"^(?:[A-Z]\.\s*)?[A-Za-z]+(?:\s+[A-Za-z]+){1,3}$", part_str):
+                if not any(loc.lower() in part_str.lower() for loc in LOCATIONS_DB) and not any(w in part_str.upper() for w in EXCLUDE_NAME_WORDS):
+                    hits.append(PiiHit("Regex", "PERSON", part_str, PII_DISPLAY_NAMES["PERSON"]))
+
+    # Deduplicate
+    dedup: List[PiiHit] = []
+    seen = set()
+    for h in hits:
+        key = (h.label.upper(), re.sub(r"[\s\-]", "", h.value).lower())
+        if key not in seen and h.value.strip():
+            seen.add(key)
+            dedup.append(h)
+
+    return dedup
 
 def full_pii_scan(text: str, hf_token: str = "") -> List[PiiHit]:
-    all_hits: List[PiiHit] = []
-    seen_keys: set = set()
-
-    for h in regex_pii_scan(text):
-        key = (h.label.upper(), re.sub(r"[\s\-]", "", h.value).lower())
-        if key not in seen_keys and h.value.strip():
-            all_hits.append(h)
-            seen_keys.add(key)
-
-    return all_hits
+    return scan_text_line_by_line(text)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ANONYMIZATION
@@ -331,32 +381,34 @@ def _compute_missed_strict(text: str, found_entities: List[str]) -> List[str]:
     return missed
 
 def run_ner_all(text: str, hf_token: str = "") -> Dict[str, NerResult]:
-    results: Dict[str, NerResult] = {}
+    hits = scan_text_line_by_line(text)
     
-    regex_persons = list(dict.fromkeys([m.group(0).strip() for m in HONORIFIC_NAME_RE.finditer(text)]))
+    line_persons = [h.value for h in hits if h.label == "PERSON"]
+    line_locs    = [h.value for h in hits if h.label == "Location"]
     
-    found_locs = []
-    for loc in INDIAN_CITIES:
-        for m in re.finditer(r"\b" + re.escape(loc) + r"\b", text, re.I):
-            found_locs.append(m.group(0).strip().title())
-    regex_locs = list(dict.fromkeys(found_locs))
+    line_orgs = []
+    for m in re.finditer(r"\b(?:State\s*Bank\s*of\s*India|SBI|Deputy\s*Commissioner|District\s*Grievance\s*Redressal\s*Office|Local\s*Ward\s*Office|Office\s*of\s*the\s*Deputy\s*Commissioner|A\.S\.G\.P\.A|S\.R\.O)\b", text, re.I):
+        line_orgs.append(m.group(0).strip())
 
-    org_re = re.compile(r"\b(?:State\s*Bank\s*of\s*India|SBI|Deputy\s*Commissioner|District\s*Grievance\s*Redressal\s*Office|Local\s*Ward\s*Office)\b", re.I)
-    regex_orgs = list(dict.fromkeys([m.group(0).strip() for m in org_re.finditer(text)]))
+    persons = list(dict.fromkeys(line_persons))
+    locs    = list(dict.fromkeys(line_locs))
+    orgs    = list(dict.fromkeys(line_orgs))
+
+    results: Dict[str, NerResult] = {}
 
     for key, (display_label, model_id) in NER_MODELS.items():
         nr = NerResult(model=display_label)
-        nr.persons = [p for p in regex_persons]
-        nr.locs    = [l for l in regex_locs]
-        nr.orgs    = [o for o in regex_orgs]
+        nr.persons = persons
+        nr.locs    = locs
+        nr.orgs    = orgs
         all_found  = nr.persons + nr.locs + nr.orgs
         nr.missed  = _compute_missed_strict(text, all_found)
         results[display_label] = nr
 
     hybrid = NerResult(model=HYBRID_KEY)
-    hybrid.persons = regex_persons
-    hybrid.locs    = regex_locs
-    hybrid.orgs    = regex_orgs
+    hybrid.persons = persons
+    hybrid.locs    = locs
+    hybrid.orgs    = orgs
     all_found_h    = hybrid.persons + hybrid.locs + hybrid.orgs
     hybrid.missed  = _compute_missed_strict(text, all_found_h)
     results[HYBRID_KEY] = hybrid
@@ -367,10 +419,10 @@ def _ner_entity_str(nr: NerResult) -> str:
     parts = []
     if nr.persons:
         parts.append("[PER] " + " | ".join(nr.persons))
-    if nr.orgs:
-        parts.append("[ORG] " + " | ".join(nr.orgs))
     if nr.locs:
         parts.append("[LOC] " + " | ".join(nr.locs))
+    if nr.orgs:
+        parts.append("[ORG] " + " | ".join(nr.orgs))
     return " || ".join(parts) if parts else "None"
 
 def _ner_missed_str(nr: NerResult) -> str:
@@ -547,7 +599,7 @@ def build_excel(records: List[FileRecord], output_path: str):
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_args():
-    ap = argparse.ArgumentParser(description="TXT → PII/NER Detection → Excel Report")
+    ap = argparse.ArgumentParser(description="TXT → Line-by-Line PII/NER Detection → Excel Report")
     ap.add_argument("--input", "-i", default=DEFAULT_INPUT_PATH)
     ap.add_argument("--output", "-o", default=DEFAULT_OUTPUT_PATH)
     ap.add_argument("--hf_token", default=os.getenv("HF_TOKEN", ""))
@@ -568,6 +620,7 @@ def main():
         records.append(FileRecord(path=fp, filename=os.path.basename(fp), language=lang, raw_text=raw))
 
     for rec in records:
+        print(f"Processing line-by-line: {rec.filename} …")
         rec.pii_hits = full_pii_scan(rec.raw_text, args.hf_token)
         rec.ner_results = run_ner_all(rec.raw_text, args.hf_token)
 
