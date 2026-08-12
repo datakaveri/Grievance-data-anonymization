@@ -26,11 +26,17 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
 # Pre-download spaCy English model for Presidio NLP engine
 RUN python -m spacy download en_core_web_lg --quiet
 
-# Create input and output directories
-RUN mkdir -p /app/data /app/output
-
 # Copy application source code
 COPY app/ ./app/
+
+# Pre-cache HuggingFace NER models for offline container execution
+RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
+models=['cfilt/HiNER-original-muril-base-cased','ai4bharat/IndicNER','dslim/bert-base-NER','Babelscape/wikineural-multilingual-ner']; \
+[AutoTokenizer.from_pretrained(m, use_fast=False) for m in models]; \
+[AutoModelForTokenClassification.from_pretrained(m) for m in models]" || true
+
+# Create input and output directories
+RUN mkdir -p /app/data /app/output
 
 # Environment Variables
 ENV HF_TOKEN=""

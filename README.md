@@ -1,43 +1,52 @@
 # 🛡️ Grievance Data PII Anonymization & NER Evaluation Pipeline
 
-A production-ready, unified processing pipeline for **text-based grievance analysis, language identification, multi-category PII detection, automated contextual redaction, and multi-model Named Entity Recognition (NER) benchmarking**.
+A production-ready, unified processing pipeline for **multi-format grievance analysis, language identification, multi-category PII detection (Regex + Microsoft Presidio), automated contextual redaction, and multi-model Named Entity Recognition (NER) benchmarking**.
 
-Built to process administrative, medical, and public grievance text documents in **English, Indic scripts (Hindi/Devanagari, Bengali, Tamil, Telugu), and Mixed languages**.
+Built to process administrative, medical, and public grievance documents in **English, Indic scripts (Hindi/Devanagari, Bengali, Tamil, Telugu), and Mixed languages**.
 
 ---
 
 ## 🌟 Key Features
 
-1. **Automatic Script & Language Detection**:
+1. **Multi-Format Document & String Input Support**:
+   - Reads `.txt`, `.docx`, `.doc`, and `.html` files (single file or full folder).
+   - Supports direct **inline text string analysis** via command-line argument (`--text "Your text here"`).
+
+2. **Automatic Script & Language Detection**:
    - Classifies document languages into **Hindi (Devanagari)**, **Bengali**, **Tamil**, **Telugu**, **English**, **Mixed**, or **Unknown**.
 
-2. **20+ Category Contextual & Pattern PII Engine**:
-   - **Government & National IDs**: Aadhaar Number, PAN Card, Voter ID, Passport Number, Driving License, Parivar Pehchan Patra (PPP / Family ID), User ID / Portal ID.
-   - **Financial Particulars**: Bank Account Number (with labeled context detection), Credit / Debit Card Number, IFSC Code.
-   - **Contact Information**: Phone Number, Email Address, IP Address.
-   - **Administrative & Location**: Haryana & Indian Cities / Districts (e.g., Karnal, Jhajjar, Rohtak, Gurugram, Delhi, etc.), Pin Codes.
-   - **Personal Particulars**: Honorific Person Names (e.g., *Shri Ramesh Kumar*, *Dr. Anjali Verma*), Date of Birth (DOB).
+3. **Hybrid PII Detection Engine (Regex + Presidio)**:
+   - **Structured Regex & Contextual Rules**: Labeled and unlabelled pattern scanning with false-positive filtering.
+   - **Microsoft Presidio Analyzer**: Leverages spaCy (`en_core_web_lg`) for deep NLP-based entity detection.
+   - **20+ PII Categories**:
+     - *Government & Identifiers*: Aadhaar Number, PAN Card, Voter ID, Passport Number, Driving License, Parivar Pehchan Patra (PPP / Family ID), User ID / Portal ID.
+     - *Financial*: Bank Account Number (with context validation), Credit / Debit Card Number, IFSC Code.
+     - *Contact & Network*: Phone Number, Email Address, IP Address.
+     - *Administrative & Location*: Haryana & Indian Cities / Districts (e.g., Karnal, Jhajjar, Rohtak, Gurugram, Delhi), Pin Codes.
+     - *Personal Particulars*: Person Names with Honorifics (*Shri*, *Smt.*, *Dr.*, *Prof.*), Date of Birth (DOB), Age.
 
-3. **Privacy-Preserving Anonymization Strategies**:
+4. **Privacy-Preserving Anonymization Strategies**:
    - **Partial Masking**: Aadhaar (`XXXX XXXX 1234`), Phone (`XXXXXX9876`), Bank Account (`********5678`), PAN (`ABCDE****F`).
    - **Domain-Preserving Masking**: Email (`jo****@domain.com`).
    - **Tokenization**: Credit Card (`XXXX-XXXX-XXXX-4321`).
    - **Initial-Only Masking**: Person Names (`R. K. S.`).
    - **One-Way Hashing**: SHA-256 hash for generic tokens.
 
-4. **Multi-Model NER Benchmark**:
+5. **Multi-Model NER Benchmark**:
    Compares entity extraction across 5 model configurations:
    - **HiNER**: `cfilt/HiNER-original-muril-base-cased` (IIT Bombay / MuRIL)
    - **IndicNER**: `ai4bharat/IndicNER` (AI4Bharat Multilingual)
    - **BERT-Base-NER**: `dslim/bert-base-NER` (English)
    - **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (Multilingual)
-   - **Hybrid**: Combined HiNER + IndicNER ensemble.
+   - **Hybrid**: Ensemble of HiNER + IndicNER + XLM-RoBERTa.
 
-5. **Automated 4-Sheet Excel Audit Report**:
-   - **Sheet 1: Summary**: File-level overview, language breakdown, total PII hits, and detection status.
-   - **Sheet 2: PII Detection**: Detailed audit log of every detected PII entity, source detector, display name, and XML-style tags (`<Aadhaar>...</Aadhaar>`).
-   - **Sheet 3: NER Comparison**: Model-by-model comparison of predicted entity types (`PERSON`, `LOCATION`, `ORGANIZATION`), extracted entity text, and strict missed entity computation.
-   - **Sheet 4: Anonymization**: Full record of original values vs anonymized output, masking method used, and description.
+6. **Dual Export Formats (Excel & Structured JSON)**:
+   - **4-Sheet Color-Coded Excel Workbook**:
+     - *Sheet 1: Summary*: Overview of processed files, script language, total PII hits, and detection status.
+     - *Sheet 2: PII Detection*: Detailed audit log of detected PII, detector source (Regex vs Presidio), display name, and XML tags (`<Aadhaar>...</Aadhaar>`).
+     - *Sheet 3: NER Comparison*: Model-by-model comparison of predicted types (`PERSON`, `LOCATION`, `ORGANIZATION`), extracted entity text, and strict missed entity computation.
+     - *Sheet 4: Anonymization*: Full record of original values vs anonymized output, masking method used, and technique description.
+   - **Structured JSON File**: Programmatic export automatically saved alongside the `.xlsx` report (`pii_ner_report.json`).
 
 ---
 
@@ -46,14 +55,14 @@ Built to process administrative, medical, and public grievance text documents in
 ```text
 Grievance-data-anonymization/
 ├── app/
-│   ├── main.py             # Main execution workflow (Language -> PII -> NER -> Excel Export)
-│   └── kaggle_setup.py     # Automated environment & dependency setup script
-├── data/                   # Input folder for text document datasets (.txt)
-├── output/                 # Output folder for generated Excel reports
-├── Dockerfile              # Container definition for reproducible deployment
-├── docker-compose.yml      # Docker Compose configuration for volume mounting
+│   ├── main.py             # Core pipeline execution script (Language -> PII -> NER -> Excel/JSON Export)
+│   └── kaggle_setup.py     # Automated environment setup & model pre-downloader script
+├── data/                   # Input folder for document datasets (.txt, .docx, .doc, .html)
+├── output/                 # Output directory for generated Excel (.xlsx) and JSON (.json) reports
+├── Dockerfile              # Docker container definition with model pre-caching
+├── docker-compose.yml      # Docker Compose configuration with volume mounts
 ├── requirements.txt        # Python dependency specifications
-└── README.md               # Comprehensive documentation
+└── README.md               # Pipeline documentation
 ```
 
 ---
@@ -76,18 +85,21 @@ cd Grievance-data-anonymization
 python3 -m venv venv
 source venv/bin/activate
 
-# 3. Option A: Run automated setup script
+# 3. Automated Dependency & Model Setup (Downloads spaCy & 4 NER models to cache)
 python app/kaggle_setup.py
 
-# OR Option B: Manual pip installation
+# OR Manual Setup
 pip install -r requirements.txt
 python -m spacy download en_core_web_lg
 
-# 4. Place your input .txt files in data/ directory
+# 4. Create data and output folders
 mkdir -p data output
 
-# 5. Run the main processing pipeline
+# 5. Run pipeline on input folder/file
 python app/main.py --input data --output output/pii_ner_report.xlsx
+
+# 6. OR Run pipeline directly on an inline text string
+python app/main.py --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123, email: ramesh@example.com" --output output/inline_report.xlsx
 ```
 
 ---
@@ -115,7 +127,7 @@ docker run --rm \
 # 1. Create input data and output folders
 mkdir -p data output
 
-# 2. Build and launch
+# 2. Build and launch container
 docker compose up --build
 ```
 
@@ -125,28 +137,40 @@ docker compose up --build
 
 | Argument | Short Flag | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--input` | `-i` | `/kaggle/input/datasets/gogul0604/text-dataset` | Path to single `.txt` file or input directory containing `.txt` files. |
-| `--output` | `-o` | `pii_ner_report.xlsx` | Output Excel file path for generating the 4-sheet report. |
-| `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models. |
+| `--input` | `-i` | `/kaggle/input/datasets/gogul0604/test-dataset` | Path to a single file (`.txt`/`.docx`/`.doc`/`.html`) or folder containing documents. |
+| `--text` | `-t` | `None` | Inline text string to analyse directly instead of reading files. |
+| `--output` | `-o` | `pii_ner_report.xlsx` | Output `.xlsx` file path (JSON report generated automatically as `.json`). |
+| `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models (such as IndicNER). |
 
-### Example Custom Execution:
+### Example CLI Usage:
+
+**Folder / File Processing:**
 ```bash
-python app/main.py --input /path/to/my_texts --output output/custom_report.xlsx
+python app/main.py --input data/sample_complaint.txt --output output/sample_report.xlsx
+```
+
+**Direct Text Processing:**
+```bash
+python app/main.py --text "Application by Dr. S. K. Sharma, PAN ABCDE1234F, Phone +91 9876543210" --output output/inline_report.xlsx
 ```
 
 ---
 
-## 📊 Excel Report Schema
+## 📊 Generated Reports Schema
 
-Upon completion, the pipeline outputs a color-formatted Excel workbook containing:
+Upon execution, the pipeline outputs two reports:
 
-1. **`Summary`**: File name, script language, total PII entity count, detected PII types, and hybrid NER person names.
-2. **`PII Detection`**: Full text, PII category, display name, detected value, detector source, and tagged XML output.
-3. **`NER Comparison`**: Side-by-side entity predictions (`HiNER`, `IndicNER`, `BERT_Base_NER`, `XLM_RoBERTa`, `Hybrid`) and missed entity terms.
-4. **`Anonymization`**: Original text vs anonymized text, masking technique (`Partial Masking`, `Domain-Preserving`, `Tokenization`, `Initial-Only`), and technique explanation.
+1. **Excel Workbook (`.xlsx`)**:
+   - `Summary`: Processed file summary, script language, PII hit counts, and detection status.
+   - `PII Detection`: Line-level PII audit with detector source (Regex vs Presidio), display names, raw values, and XML tags.
+   - `NER Comparison`: Comparative side-by-side entity extraction across 5 models (`HiNER`, `IndicNER`, `BERT_Base_NER`, `XLM_RoBERTa`, `Hybrid`) and missed entity terms.
+   - `Anonymization`: Complete record of original text vs anonymized text, redaction technique, and description.
+
+2. **JSON Report (`.json`)**:
+   - Programmatic JSON structure containing document metadata, detected PII hits, line-by-line breakdown, and model predictions.
 
 ---
 
-## 🔒 Privacy & Security
+## 🔒 Security & Privacy
 
-All processing is executed **100% locally**. No document content, personal identifiers, or metadata are transmitted to external services.
+All processing is executed **100% locally** on your machine or container. No document content, personal identifiers, or metadata are transmitted to external services.
