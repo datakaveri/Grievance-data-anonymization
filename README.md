@@ -8,8 +8,8 @@ Built to process administrative, medical, and public grievance documents in **En
 
 ## 🌟 Key Features
 
-1. **Multi-Format Document & String Input Support**:
-   - Reads `.txt`, `.docx`, `.doc`, and `.html` files (single file or full folder).
+1. **Multi-Format Document & Inline Text String Input Support**:
+   - Reads `.txt`, `.docx`, `.doc`, and `.html` files (single file or entire folder).
    - Supports direct **inline text string analysis** via command-line argument (`--text "Your text here"`).
 
 2. **Automatic Script & Language Detection**:
@@ -25,14 +25,18 @@ Built to process administrative, medical, and public grievance documents in **En
      - *Administrative & Location*: Haryana & Indian Cities / Districts (e.g., Karnal, Jhajjar, Rohtak, Gurugram, Delhi), Pin Codes.
      - *Personal Particulars*: Person Names with Honorifics (*Shri*, *Smt.*, *Dr.*, *Prof.*), Date of Birth (DOB), Age.
 
-4. **Privacy-Preserving Anonymization Strategies**:
+4. **Granular Word & Character Position Tracking**:
+   - Computes **Line No**, **Word No**, **Word Position** (ordinal: `1st`, `2nd`, `3rd`), **Start Letter** & **End Letter** character offsets, and **Letter Span** (`12-24`).
+   - Includes **Confidence Scores** (`1.00 (Exact Regex/Presidio)` or model prediction probabilities).
+
+5. **Privacy-Preserving Anonymization Strategies**:
    - **Partial Masking**: Aadhaar (`XXXX XXXX 1234`), Phone (`XXXXXX9876`), Bank Account (`********5678`), PAN (`ABCDE****F`).
    - **Domain-Preserving Masking**: Email (`jo****@domain.com`).
    - **Tokenization**: Credit Card (`XXXX-XXXX-XXXX-4321`).
    - **Initial-Only Masking**: Person Names (`R. K. S.`).
    - **One-Way Hashing**: SHA-256 hash for generic tokens.
 
-5. **Multi-Model NER Benchmark**:
+6. **Multi-Model NER Benchmark**:
    Compares entity extraction across 5 model configurations:
    - **HiNER**: `cfilt/HiNER-original-muril-base-cased` (IIT Bombay / MuRIL)
    - **IndicNER**: `ai4bharat/IndicNER` (AI4Bharat Multilingual)
@@ -40,13 +44,13 @@ Built to process administrative, medical, and public grievance documents in **En
    - **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (Multilingual)
    - **Hybrid**: Ensemble of HiNER + IndicNER + XLM-RoBERTa.
 
-6. **Dual Export Formats (Excel & Structured JSON)**:
+7. **Multi-Report Output System (Excel & Per-Model JSONs)**:
    - **4-Sheet Color-Coded Excel Workbook**:
      - *Sheet 1: Summary*: Overview of processed files, script language, total PII hits, and detection status.
-     - *Sheet 2: PII Detection*: Detailed audit log of detected PII, detector source (Regex vs Presidio), display name, and XML tags (`<Aadhaar>...</Aadhaar>`).
+     - *Sheet 2: PII Detection*: Detailed audit log of detected PII with line numbers, word positions, letter spans, detector source (Regex vs Presidio), display names, and XML tags (`<Aadhaar>...</Aadhaar>`).
      - *Sheet 3: NER Comparison*: Model-by-model comparison of predicted types (`PERSON`, `LOCATION`, `ORGANIZATION`), extracted entity text, and strict missed entity computation.
-     - *Sheet 4: Anonymization*: Full record of original values vs anonymized output, masking method used, and technique description.
-   - **Structured JSON File**: Programmatic export automatically saved alongside the `.xlsx` report (`pii_ner_report.json`).
+     - *Sheet 4: Anonymization*: Complete record of original values vs anonymized output, confidence scores, position metrics, redaction technique, and description.
+   - **Per-Model JSON Reports**: Automatically generates a master JSON report (`pii_ner_report.json`) as well as separate model-specific JSON files (`pii_ner_report_hiner.json`, `pii_ner_report_indicner.json`, `pii_ner_report_hybrid.json`, etc.).
 
 ---
 
@@ -55,7 +59,7 @@ Built to process administrative, medical, and public grievance documents in **En
 ```text
 Grievance-data-anonymization/
 ├── app/
-│   ├── main.py             # Core pipeline execution script (Language -> PII -> NER -> Excel/JSON Export)
+│   ├── main.py             # Core pipeline execution script (Language -> PII -> NER -> Position Tracking -> Excel/JSON Export)
 │   └── kaggle_setup.py     # Automated environment setup & model pre-downloader script
 ├── data/                   # Input folder for document datasets (.txt, .docx, .doc, .html)
 ├── output/                 # Output directory for generated Excel (.xlsx) and JSON (.json) reports
@@ -139,7 +143,7 @@ docker compose up --build
 | :--- | :--- | :--- | :--- |
 | `--input` | `-i` | `/kaggle/input/datasets/gogul0604/test-dataset` | Path to a single file (`.txt`/`.docx`/`.doc`/`.html`) or folder containing documents. |
 | `--text` | `-t` | `None` | Inline text string to analyse directly instead of reading files. |
-| `--output` | `-o` | `pii_ner_report.xlsx` | Output `.xlsx` file path (JSON report generated automatically as `.json`). |
+| `--output` | `-o` | `pii_ner_report.xlsx` | Output `.xlsx` file path (JSON reports generated automatically). |
 | `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models (such as IndicNER). |
 
 ### Example CLI Usage:
@@ -158,16 +162,16 @@ python app/main.py --text "Application by Dr. S. K. Sharma, PAN ABCDE1234F, Phon
 
 ## 📊 Generated Reports Schema
 
-Upon execution, the pipeline outputs two reports:
+Upon execution, the pipeline outputs:
 
 1. **Excel Workbook (`.xlsx`)**:
    - `Summary`: Processed file summary, script language, PII hit counts, and detection status.
-   - `PII Detection`: Line-level PII audit with detector source (Regex vs Presidio), display names, raw values, and XML tags.
+   - `PII Detection`: Line-level PII audit with `Word No`, `Word Position`, `Start Letter`, `End Letter`, `Letter Span`, detector source (Regex vs Presidio), display names, raw values, and XML tags.
    - `NER Comparison`: Comparative side-by-side entity extraction across 5 models (`HiNER`, `IndicNER`, `BERT_Base_NER`, `XLM_RoBERTa`, `Hybrid`) and missed entity terms.
-   - `Anonymization`: Complete record of original text vs anonymized text, redaction technique, and description.
+   - `Anonymization`: Complete audit record of original text vs anonymized text, position offsets, confidence scores, redaction technique, and description.
 
-2. **JSON Report (`.json`)**:
-   - Programmatic JSON structure containing document metadata, detected PII hits, line-by-line breakdown, and model predictions.
+2. **JSON Reports (`.json`)**:
+   - Master JSON report (`pii_ner_report.json`) and individual model JSON reports (`pii_ner_report_hiner.json`, `pii_ner_report_hybrid.json`, etc.) containing metadata, line numbers, word positions, character offsets, confidence scores, and entity predictions.
 
 ---
 

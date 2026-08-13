@@ -28,6 +28,27 @@ from openpyxl.utils import get_column_letter
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HELPER FUNCTIONS — POSITION & WORD CALCULATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def ordinal(n: int) -> str:
+    """Converts a 1-based word index into an ordinal representation (e.g. 1 -> '1st word', 5 -> '5th word')."""
+    if n <= 0:
+        return "N/A"
+    if 11 <= (n % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix} word"
+
+
+def get_word_number(text: str, start_char_idx: int) -> int:
+    """Calculates the 1-based word index in text for a given character start position."""
+    return len(text[:start_char_idx].split()) + 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # OPTIONAL IMPORTS — Presidio / spaCy
 # ─────────────────────────────────────────────────────────────────────────────
 try:
@@ -58,7 +79,7 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFAULT PATHS & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_INPUT_PATH = "/kaggle/input/datasets/gogul0604/test-dataset"
+DEFAULT_INPUT_PATH = "/kaggle/input/datasets/gogul0604/text-dataset"
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
 
 NER_MODELS: Dict[str, Tuple[str, str]] = {
@@ -104,6 +125,19 @@ class PiiHit:
     value: str
     display: str
     line_no: int = 0
+    word_no: int = 0
+    start_char: int = 0
+    end_char: int = 0
+
+
+@dataclass
+class NerEntity:
+    category: str
+    text: str
+    score: float
+    word_no: int = 0
+    start_char: int = 0
+    end_char: int = 0
 
 
 @dataclass
@@ -111,6 +145,7 @@ class LineNerResult:
     model: str
     line_no: int
     text: str
+    entities: List[NerEntity] = field(default_factory=list)
     persons: List[str] = field(default_factory=list)
     locs: List[str] = field(default_factory=list)
     orgs: List[str] = field(default_factory=list)
@@ -130,12 +165,18 @@ class LineNerResult:
     @property
     def extracted_text(self) -> str:
         parts = []
-        if self.persons:
-            parts.append("[PER] " + " | ".join(self.persons))
-        if self.locs:
-            parts.append("[LOC] " + " | ".join(self.locs))
-        if self.orgs:
-            parts.append("[ORG] " + " | ".join(self.orgs))
+        for cat_label, cat_code in [
+            ("PER", "PERSON"),
+            ("LOC", "LOCATION"),
+            ("ORG", "ORGANIZATION"),
+        ]:
+            cat_ents = [e for e in self.entities if e.category == cat_code]
+            if cat_ents:
+                formatted = [
+                    f"{e.text} (conf: {e.score:.2f}, {ordinal(e.word_no)}, letters {e.start_char}-{e.end_char})"
+                    for e in cat_ents
+                ]
+                parts.append(f"[{cat_label}] " + " | ".join(formatted))
         return " || ".join(parts) if parts else "None"
 
 
@@ -332,14 +373,27 @@ def _run_presidio_on_line(line: str, engine) -> List[PiiHit]:
             if not value or re.match(r"^\d{1,4}$", value):
                 continue
 
-            # Disambiguate Date vs. Age: Ignore Presidio Dates that contain age phrases
             if internal_label == "Date" and re.search(
                 r"\b(?:year|years|aged?|old)\b", value, re.I
             ):
                 continue
 
+            word_no = get_word_number(line, r.start)
+            start_char = r.start + 1
+            end_char = r.end
             display = PII_DISPLAY_NAMES.get(internal_label, internal_label)
-            hits.append(PiiHit("Presidio", internal_label, value, display))
+
+            hits.append(
+                PiiHit(
+                    source="Presidio",
+                    label=internal_label,
+                    value=value,
+                    display=display,
+                    word_no=word_no,
+                    start_char=start_char,
+                    end_char=end_char,
+                )
+            )
     except Exception:
         pass
     return hits
@@ -370,6 +424,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Email"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -384,6 +441,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Credit_Card"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -401,6 +461,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                         val,
                         PII_DISPLAY_NAMES["Driving_License"],
                         lno,
+                        get_word_number(line_str, m.start()),
+                        m.start() + 1,
+                        m.end(),
                     )
                 )
 
@@ -412,6 +475,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["PAN"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -425,6 +491,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Vehicle_Number"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -438,6 +507,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Voter_ID"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -449,6 +521,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Passport"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -464,6 +539,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(1).strip(),
                     PII_DISPLAY_NAMES["User_ID"],
                     lno,
+                    get_word_number(line_str, m.start(1)),
+                    m.start(1) + 1,
+                    m.end(1),
                 )
             )
 
@@ -479,6 +557,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(1).strip(),
                     PII_DISPLAY_NAMES["PPP_ID"],
                     lno,
+                    get_word_number(line_str, m.start(1)),
+                    m.start(1) + 1,
+                    m.end(1),
                 )
             )
 
@@ -494,6 +575,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(1).strip(),
                     PII_DISPLAY_NAMES["Bank_Account"],
                     lno,
+                    get_word_number(line_str, m.start(1)),
+                    m.start(1) + 1,
+                    m.end(1),
                 )
             )
 
@@ -508,6 +592,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Aadhaar"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -519,6 +606,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["IFSC_Code"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -532,6 +622,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["IP_Address"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
@@ -552,6 +645,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                         val,
                         PII_DISPLAY_NAMES["Phone_Number"],
                         lno,
+                        get_word_number(line_str, m.start(1)),
+                        m.start(1) + 1,
+                        m.end(1),
                     )
                 )
 
@@ -566,19 +662,26 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     m.group(0).strip(),
                     PII_DISPLAY_NAMES["Date"],
                     lno,
+                    get_word_number(line_str, m.start()),
+                    m.start() + 1,
+                    m.end(),
                 )
             )
 
         for m in re.finditer(
-            r"\baged?\s+(?:about\s+)?(\d{1,3})\s*[Yy]ears?\b", line_str
+            r"\baged?\s+(?:about\s+)?(\d{1,3}\s*[Yy]ears?)\b", line_str
         ):
+            val = m.group(1).strip()
             hits.append(
                 PiiHit(
                     "Regex",
                     "Age",
-                    m.group(1).strip() + " years",
+                    val,
                     PII_DISPLAY_NAMES["Age"],
                     lno,
+                    get_word_number(line_str, m.start(1)),
+                    m.start(1) + 1,
+                    m.end(1),
                 )
             )
 
@@ -596,6 +699,9 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                         val,
                         PII_DISPLAY_NAMES["Pincode"],
                         lno,
+                        get_word_number(line_str, m.start()),
+                        m.start() + 1,
+                        m.end(),
                     )
                 )
 
@@ -645,7 +751,6 @@ def merge_pii_hits(
 ) -> List[PiiHit]:
     merged = list(regex_hits)
 
-    # Disambiguate overlapping Regex and Presidio hits on the same line
     for p in presidio_hits:
         p_val_clean = re.sub(r"[\s\-]", "", p.value).lower()
         overlap_found = False
@@ -842,44 +947,48 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
 
 def merge_line_spans(
     spans: List[Dict], original_line: str
-) -> List[Tuple[str, str]]:
+) -> List[NerEntity]:
     """
-    Snaps raw character spans to complete word boundaries and merges
-    overlapping same-category entity spans into the widest contiguous entity.
+    Snaps raw character spans to complete word boundaries, merges overlapping
+    spans into contiguous entities, and computes confidence score, word position,
+    and start/end letter numbers.
     """
     if not spans:
         return []
 
-    # 1. Snap each predicted span to complete word boundaries
     snapped_spans: List[Dict] = []
     for s in spans:
         st, en = _snap_to_word_boundary(original_line, s["start"], s["end"])
         val = original_line[st:en].strip(" :-.,'()")
 
-        # Filter out numbers, single letters, and noise
         if not val or len(val) < 2 or re.match(r"^\d+$", val):
             continue
+
+        word_no = get_word_number(original_line, st)
+        start_char = st + 1
+        end_char = en
 
         snapped_spans.append(
             {
                 "cat": s["cat"],
                 "start": st,
                 "end": en,
-                "score": s["score"],
+                "score": float(s["score"]),
                 "text": val,
+                "word_no": word_no,
+                "start_char": start_char,
+                "end_char": end_char,
             }
         )
 
     if not snapped_spans:
         return []
 
-    # 2. Sort spans by start offset ascending, then length descending
     sorted_spans = sorted(
         snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"]))
     )
     merged: List[Dict] = []
 
-    # 3. Collapse overlapping spans into the widest complete entity
     for s in sorted_spans:
         target = None
         for m in merged:
@@ -892,17 +1001,19 @@ def merge_line_spans(
         if target is None:
             merged.append(dict(s))
         else:
-            # Expand existing span to cover the full range of both overlapping predictions
             new_start = min(target["start"], s["start"])
             new_end = max(target["end"], s["end"])
             target["start"] = new_start
             target["end"] = new_end
             target["text"] = original_line[new_start:new_end].strip(" :-.,'()")
             target["score"] = max(target["score"], s["score"])
+            target["word_no"] = get_word_number(original_line, new_start)
+            target["start_char"] = new_start + 1
+            target["end_char"] = new_end
 
     merged.sort(key=lambda x: x["start"])
 
-    entities: List[Tuple[str, str]] = []
+    entities: List[NerEntity] = []
     seen = set()
     for m in merged:
         clean_val = m["text"]
@@ -910,7 +1021,16 @@ def merge_line_spans(
             key = (m["cat"], clean_val.lower())
             if key not in seen:
                 seen.add(key)
-                entities.append((m["cat"], clean_val))
+                entities.append(
+                    NerEntity(
+                        category=m["cat"],
+                        text=clean_val,
+                        score=round(m["score"], 4),
+                        word_no=m["word_no"],
+                        start_char=m["start_char"],
+                        end_char=m["end_char"],
+                    )
+                )
 
     return entities
 
@@ -1088,7 +1208,7 @@ def run_line_by_line_ner(records: List[FileRecord]):
                 continue
 
             model_raw_spans: Dict[str, List[Dict]] = {}
-            model_line_ents: Dict[str, List[Tuple[str, str]]] = {}
+            model_line_ents: Dict[str, List[NerEntity]] = {}
 
             for model_lbl, (pipe, threshold) in pipes.items():
                 spans = _extract_line_spans_chunked(
@@ -1106,26 +1226,28 @@ def run_line_by_line_ner(records: List[FileRecord]):
             model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, original_line)
 
             all_line_ents = set(
-                (cat, val)
+                (e.category, e.text)
                 for ents in model_line_ents.values()
-                for cat, val in ents
+                for e in ents
             )
 
             for model_lbl, ents in model_line_ents.items():
-                persons = [val for cat, val in ents if cat == "PERSON"]
-                locs = [val for cat, val in ents if cat == "LOCATION"]
-                orgs = [val for cat, val in ents if cat == "ORGANIZATION"]
+                persons = [e.text for e in ents if e.category == "PERSON"]
+                locs = [e.text for e in ents if e.category == "LOCATION"]
+                orgs = [e.text for e in ents if e.category == "ORGANIZATION"]
 
+                current_ent_pairs = set((e.category, e.text) for e in ents)
                 missed = [
                     f"{val} ({cat})"
                     for cat, val in all_line_ents
-                    if (cat, val) not in set(ents)
+                    if (cat, val) not in current_ent_pairs
                 ]
 
                 lres = LineNerResult(
                     model=model_lbl,
                     line_no=lno,
                     text=original_line,
+                    entities=ents,
                     persons=persons,
                     locs=locs,
                     orgs=orgs,
@@ -1135,16 +1257,33 @@ def run_line_by_line_ner(records: List[FileRecord]):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JSON GENERATOR
+# JSON GENERATOR (MAIN + INDIVIDUAL MODEL JSONs)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def build_json(records: List[FileRecord], output_path: str):
-    json_path = os.path.splitext(output_path)[0] + ".json"
-    print(f"\n▶ Writing JSON report → {json_path} …", flush=True)
+    base_name, _ = os.path.splitext(output_path)
+    main_json_path = base_name + ".json"
+    print(f"\n▶ Writing JSON reports → {base_name}_*.json …", flush=True)
 
-    export_data = []
+    all_models = [
+        NER_MODELS["HiNER"][0],
+        NER_MODELS["IndicNER"][0],
+        NER_MODELS["BERT_Base_NER"][0],
+        NER_MODELS["XLM_RoBERTa"][0],
+        HYBRID_KEY,
+    ]
 
+    model_slugs = {
+        NER_MODELS["HiNER"][0]: "HiNER",
+        NER_MODELS["IndicNER"][0]: "IndicNER",
+        NER_MODELS["BERT_Base_NER"][0]: "BERT_Base_NER",
+        NER_MODELS["XLM_RoBERTa"][0]: "XLM_RoBERTa",
+        HYBRID_KEY: "Hybrid",
+    }
+
+    # 1. Combined / Main JSON Report
+    main_export = []
     for rec in records:
         file_entry = {
             "file_info": {
@@ -1153,61 +1292,108 @@ def build_json(records: List[FileRecord], output_path: str):
                 "language": rec.language,
                 "path": rec.path,
             },
-            "pii_detections": [],
-            "ner_detections": [],
-        }
-
-        for h in rec.pii_hits:
-            file_entry["pii_detections"].append(
+            "pii_detections": [
                 {
                     "line_no": h.line_no,
+                    "word_no": h.word_no,
+                    "word_position": ordinal(h.word_no),
+                    "start_letter": h.start_char,
+                    "end_letter": h.end_char,
+                    "letter_span": f"{h.start_char}-{h.end_char}",
                     "source": h.source,
                     "type": h.label,
                     "display_type": h.display,
                     "original_value": h.value,
                     "tag": f"<{h.label}>{h.value}</{h.label}>",
                 }
-            )
+                for h in rec.pii_hits
+            ],
+            "ner_detections": [],
+        }
 
         hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
         for lres in hybrid_lines:
-            for p in lres.persons:
+            for ent in lres.entities:
                 file_entry["ner_detections"].append(
                     {
                         "line_no": lres.line_no,
+                        "word_no": ent.word_no,
+                        "word_position": ordinal(ent.word_no),
+                        "start_letter": ent.start_char,
+                        "end_letter": ent.end_char,
+                        "letter_span": f"{ent.start_char}-{ent.end_char}",
                         "source": HYBRID_KEY,
-                        "type": "PERSON",
-                        "original_value": p,
-                        "tag": f"<PERSON>{p}</PERSON>",
+                        "type": ent.category,
+                        "original_value": ent.text,
+                        "confidence_score": ent.score,
+                        "tag": f"<{ent.category}>{ent.text}</{ent.category}>",
                     }
                 )
-            for loc in lres.locs:
-                file_entry["ner_detections"].append(
+
+        main_export.append(file_entry)
+
+    with open(main_json_path, "w", encoding="utf-8") as f:
+        json.dump(main_export, f, indent=2, ensure_ascii=False)
+    print(f"  ✅ Main combined JSON report generated → {main_json_path}", flush=True)
+
+    # 2. Individual JSON File for EACH NER Model
+    for model_lbl in all_models:
+        slug = model_slugs.get(model_lbl, re.sub(r"\W+", "_", model_lbl))
+        model_json_path = f"{base_name}_{slug}.json"
+
+        model_export = []
+        for rec in records:
+            file_entry = {
+                "file_info": {
+                    "filename": rec.filename,
+                    "file_type": rec.file_type.upper(),
+                    "language": rec.language,
+                    "path": rec.path,
+                },
+                "model_name": model_lbl,
+                "pii_detections": [
                     {
-                        "line_no": lres.line_no,
-                        "source": HYBRID_KEY,
-                        "type": "LOCATION",
-                        "original_value": loc,
-                        "tag": f"<LOCATION>{loc}</LOCATION>",
+                        "line_no": h.line_no,
+                        "word_no": h.word_no,
+                        "word_position": ordinal(h.word_no),
+                        "start_letter": h.start_char,
+                        "end_letter": h.end_char,
+                        "letter_span": f"{h.start_char}-{h.end_char}",
+                        "source": h.source,
+                        "type": h.label,
+                        "display_type": h.display,
+                        "original_value": h.value,
+                        "tag": f"<{h.label}>{h.value}</{h.label}>",
                     }
-                )
-            for org in lres.orgs:
-                file_entry["ner_detections"].append(
-                    {
-                        "line_no": lres.line_no,
-                        "source": HYBRID_KEY,
-                        "type": "ORGANIZATION",
-                        "original_value": org,
-                        "tag": f"<ORGANIZATION>{org}</ORGANIZATION>",
-                    }
-                )
+                    for h in rec.pii_hits
+                ],
+                "ner_detections": [],
+            }
 
-        export_data.append(file_entry)
+            model_lines = rec.line_ners.get(model_lbl, [])
+            for lres in model_lines:
+                for ent in lres.entities:
+                    file_entry["ner_detections"].append(
+                        {
+                            "line_no": lres.line_no,
+                            "word_no": ent.word_no,
+                            "word_position": ordinal(ent.word_no),
+                            "start_letter": ent.start_char,
+                            "end_letter": ent.end_char,
+                            "letter_span": f"{ent.start_char}-{ent.end_char}",
+                            "source": model_lbl,
+                            "type": ent.category,
+                            "original_value": ent.text,
+                            "confidence_score": ent.score,
+                            "tag": f"<{ent.category}>{ent.text}</{ent.category}>",
+                        }
+                    )
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(export_data, f, indent=2, ensure_ascii=False)
+            model_export.append(file_entry)
 
-    print(f"  ✅ JSON report generated successfully → {json_path}", flush=True)
+        with open(model_json_path, "w", encoding="utf-8") as f:
+            json.dump(model_export, f, indent=2, ensure_ascii=False)
+        print(f"  ✅ Separate JSON generated for {slug} → {model_json_path}", flush=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1262,6 +1448,7 @@ def build_excel(
         HYBRID_KEY,
     ]
 
+    # Sheet 1: Summary
     s1_rows = []
     for rec in records:
         all_hits = rec.pii_hits
@@ -1302,6 +1489,7 @@ def build_excel(
             }
         )
 
+    # Sheet 2: PII Detection
     s2_rows = []
     for rec in records:
         if not rec.pii_hits:
@@ -1311,6 +1499,11 @@ def build_excel(
                     "File Type": rec.file_type.upper(),
                     "Language": rec.language,
                     "Line No": "-",
+                    "Word No": "-",
+                    "Word Position": "-",
+                    "Start Letter": "-",
+                    "End Letter": "-",
+                    "Letter Span": "-",
                     "Extracted Text": rec.raw_text,
                     "PII Type": "None",
                     "PII Display Name": "None",
@@ -1333,6 +1526,11 @@ def build_excel(
                         "File Type": rec.file_type.upper(),
                         "Language": rec.language,
                         "Line No": h.line_no,
+                        "Word No": h.word_no,
+                        "Word Position": ordinal(h.word_no),
+                        "Start Letter": h.start_char,
+                        "End Letter": h.end_char,
+                        "Letter Span": f"{h.start_char}-{h.end_char}",
                         "Extracted Text": line_text,
                         "PII Type": h.label,
                         "PII Display Name": h.display,
@@ -1342,6 +1540,7 @@ def build_excel(
                     }
                 )
 
+    # Sheet 3: NER Comparison
     s3_rows = []
     for rec in records:
         line_count = len(rec.line_ners.get(HYBRID_KEY, []))
@@ -1385,6 +1584,7 @@ def build_excel(
                     )
                 s3_rows.append(row)
 
+    # Sheet 4: Anonymization
     s4_rows = []
     for rec in records:
         lines = rec.raw_text.splitlines()
@@ -1402,11 +1602,17 @@ def build_excel(
                     "File Type": rec.file_type.upper(),
                     "Language": rec.language,
                     "Line No": h.line_no,
+                    "Word No": h.word_no,
+                    "Word Position": ordinal(h.word_no),
+                    "Start Letter": h.start_char,
+                    "End Letter": h.end_char,
+                    "Letter Span": f"{h.start_char}-{h.end_char}",
                     "Extracted Text": line_text,
                     "Source Type": "PII",
                     "Detection Engine": h.source,
                     "Entity / PII Type": h.display,
                     "Original Value": h.value,
+                    "Confidence Score": "1.00 (Exact Regex/Presidio)",
                     "PII / NER Tag": f"<{h.label}>{h.value}</{h.label}>",
                     "Anonymization Method": method,
                     "Anonymized Value": anon_val,
@@ -1420,72 +1626,41 @@ def build_excel(
         for lres in hybrid_lines:
             line_text = lres.text
 
-            for p in lres.persons:
-                key = (lres.line_no, "PERSON", p.lower())
+            for ent in lres.entities:
+                key = (lres.line_no, ent.category, ent.text.lower())
                 if key in anon_seen:
                     continue
                 anon_seen.add(key)
-                method, anon_val, desc = anonymize_value("PERSON", p)
-                s4_rows.append(
-                    {
-                        "File": rec.filename,
-                        "File Type": rec.file_type.upper(),
-                        "Language": rec.language,
-                        "Line No": lres.line_no,
-                        "Extracted Text": line_text,
-                        "Source Type": "NER Model",
-                        "Detection Engine": HYBRID_KEY,
-                        "Entity / PII Type": "Person Name",
-                        "Original Value": p,
-                        "PII / NER Tag": f"<PERSON>{p}</PERSON>",
-                        "Anonymization Method": method,
-                        "Anonymized Value": anon_val,
-                        "Method Description": desc,
-                    }
+
+                display_label = (
+                    "Person Name"
+                    if ent.category == "PERSON"
+                    else (
+                        "Location / City"
+                        if ent.category == "LOCATION"
+                        else "Organization"
+                    )
                 )
 
-            for loc in lres.locs:
-                key = (lres.line_no, "LOCATION", loc.lower())
-                if key in anon_seen:
-                    continue
-                anon_seen.add(key)
-                method, anon_val, desc = anonymize_value("LOCATION", loc)
+                method, anon_val, desc = anonymize_value(ent.category, ent.text)
                 s4_rows.append(
                     {
                         "File": rec.filename,
                         "File Type": rec.file_type.upper(),
                         "Language": rec.language,
                         "Line No": lres.line_no,
+                        "Word No": ent.word_no,
+                        "Word Position": ordinal(ent.word_no),
+                        "Start Letter": ent.start_char,
+                        "End Letter": ent.end_char,
+                        "Letter Span": f"{ent.start_char}-{ent.end_char}",
                         "Extracted Text": line_text,
                         "Source Type": "NER Model",
                         "Detection Engine": HYBRID_KEY,
-                        "Entity / PII Type": "Location / City",
-                        "Original Value": loc,
-                        "PII / NER Tag": f"<LOCATION>{loc}</LOCATION>",
-                        "Anonymization Method": method,
-                        "Anonymized Value": anon_val,
-                        "Method Description": desc,
-                    }
-                )
-
-            for org in lres.orgs:
-                key = (lres.line_no, "ORGANIZATION", org.lower())
-                if key in anon_seen:
-                    continue
-                anon_seen.add(key)
-                method, anon_val, desc = anonymize_value("ORGANIZATION", org)
-                s4_rows.append(
-                    {
-                        "File": rec.filename,
-                        "File Type": rec.file_type.upper(),
-                        "Language": rec.language,
-                        "Line No": lres.line_no,
-                        "Extracted Text": line_text,
-                        "Source Type": "NER Model",
-                        "Detection Engine": HYBRID_KEY,
-                        "Entity / PII Type": "Organization",
-                        "Original Value": org,
-                        "PII / NER Tag": f"<ORGANIZATION>{org}</ORGANIZATION>",
+                        "Entity / PII Type": display_label,
+                        "Original Value": ent.text,
+                        "Confidence Score": f"{ent.score:.4f}",
+                        "PII / NER Tag": f"<{ent.category}>{ent.text}</{ent.category}>",
                         "Anonymization Method": method,
                         "Anonymized Value": anon_val,
                         "Method Description": desc,
