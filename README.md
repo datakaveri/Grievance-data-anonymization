@@ -36,11 +36,10 @@ Built to process administrative, medical, and public grievance documents in **En
    - **Initial-Only Masking**: Person Names (`R. K. S.`).
    - **One-Way Hashing**: SHA-256 hash for generic tokens.
 
-6. **Multi-Model NER Benchmark**:
-   Compares entity extraction across 5 model configurations:
+6. **Multilingual NER Ensemble**:
+   Uses three models for multilingual entity extraction:
    - **HiNER**: `cfilt/HiNER-original-muril-base-cased` (IIT Bombay / MuRIL)
    - **IndicNER**: `ai4bharat/IndicNER` (AI4Bharat Multilingual)
-   - **BERT-Base-NER**: `dslim/bert-base-NER` (English)
    - **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (Multilingual)
    - **Hybrid**: Ensemble of HiNER + IndicNER + XLM-RoBERTa.
 
@@ -60,7 +59,7 @@ Built to process administrative, medical, and public grievance documents in **En
 Grievance-data-anonymization/
 ├── app/
 │   ├── main.py             # Core pipeline execution script (Language -> PII -> NER -> Position Tracking -> Excel/JSON Export)
-│   └── kaggle_setup.py     # Automated environment setup & model pre-downloader script
+│   └── model_setup.py      # Dependency setup & Hugging Face model pre-downloader
 ├── data/                   # Input folder for document datasets (.txt, .docx, .doc, .html)
 ├── output/                 # Output directory for generated Excel (.xlsx) and JSON (.json) reports
 ├── Dockerfile              # Docker container definition with model pre-caching
@@ -90,7 +89,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # 3. Automated Dependency & Model Setup (Downloads spaCy & 4 NER models to cache)
-python app/kaggle_setup.py
+python app/model_setup.py
 
 # OR Manual Setup
 pip install -r requirements.txt
@@ -178,3 +177,45 @@ Upon execution, the pipeline outputs:
 ## 🔒 Security & Privacy
 
 All processing is executed **100% locally** on your machine or container. No document content, personal identifiers, or metadata are transmitted to external services.
+
+## Config-driven dataset batch mode
+
+The `dataset-batch-anonymization` branch also supports a single-shot dataset job. It reads CSV, JSON, XLS, or XLSX input, anonymizes only configured text columns, and writes a schema-preserving staged dataset for the downstream SKALD process.
+
+Example `config/config.json`:
+
+```json
+{
+  "data_type": "my_dataset",
+  "my_dataset": {
+    "source_input_path": "data/raw_input.csv",
+    "free_text_anonymization": {
+      "enabled": true,
+      "columns": ["Narrative", "Remarks"],
+      "staged_input_path": "output/sanitized_input.csv",
+      "minimum_confidence": 0.75,
+      "on_failure": "fail",
+      "audit_output_path": "output/anonymization_audit.json"
+    }
+  }
+}
+```
+
+Run locally:
+
+```bash
+python app/main.py --config config/config.json
+```
+
+The batch command exits after writing `output/sanitized_input.csv`. The optional audit contains only row/column references, labels, confidence, and offsets; it never writes detected values.
+
+Batch anonymization policies are hardcoded to match the legacy behavior, with stricter suppression for person names and phone numbers: Aadhaar/PAN/bank account/pincode use partial masking, email preserves its domain, cards retain only their final four digits in a tokenized form, dates become `XX-XX-YYYY`, ages are generalized to decade ranges, person/location/organization/phone values become `*`, and unknown values are one-way hashed.
+
+Run with Docker:
+
+```bash
+mkdir -p data work output
+docker compose up --build
+```
+
+Compose mounts `config/`, `data/`, `work/`, and `output/` into the container. With `on_failure: "fail"`, a missing column, unreadable file, or processing error causes a non-zero exit and no completed staged output is published. `continue` records metadata about cell failures and completes the batch. PII policies are hardcoded in the application, not supplied through config.

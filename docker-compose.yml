@@ -7,7 +7,9 @@ services:
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
     volumes:
+      - ./config:/app/config:ro
       - ./data:/app/data
+      - ./work:/app/work
       - ./output:/app/output
     # Enable NVIDIA GPU support if docker container toolkit is available:
     # deploy:

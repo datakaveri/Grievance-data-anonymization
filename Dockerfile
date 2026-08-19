@@ -31,7 +31,7 @@ COPY app/ ./app/
 
 # Pre-cache HuggingFace NER models for offline container execution
 RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
-models=['cfilt/HiNER-original-muril-base-cased','ai4bharat/IndicNER','dslim/bert-base-NER','Babelscape/wikineural-multilingual-ner']; \
+models=['cfilt/HiNER-original-muril-base-cased','ai4bharat/IndicNER','Babelscape/wikineural-multilingual-ner']; \
 [AutoTokenizer.from_pretrained(m, use_fast=False) for m in models]; \
 [AutoModelForTokenClassification.from_pretrained(m) for m in models]" || true
 
@@ -41,5 +41,7 @@ RUN mkdir -p /app/data /app/output
 # Environment Variables
 ENV HF_TOKEN=""
 
-# Default command to run the PII & NER Pipeline
-CMD ["python", "app/main.py", "--input", "/app/data", "--output", "/app/output/pii_ner_report.xlsx"]
+# Config is mounted at runtime. The job exits after writing the staged dataset.
+RUN mkdir -p /app/config
+VOLUME ["/app/config", "/app/data", "/app/output", "/app/work"]
+ENTRYPOINT ["python", "app/batch_pipeline.py", "--config", "/app/config/config.json"]

@@ -59,3 +59,5 @@ _chandra_manifest/
 # Docker / System artifacts
 .DS_Store
 .antigravity/
+
+.claude/

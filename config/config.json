@@ -1,0 +1,14 @@
+{
+  "data_type": "my_dataset",
+  "my_dataset": {
+    "source_input_path": "data/raw_input.csv",
+    "free_text_anonymization": {
+      "enabled": true,
+      "columns": ["Narrative", "Remarks"],
+      "staged_input_path": "output/sanitized_input.csv",
+      "minimum_confidence": 0.75,
+      "on_failure": "fail",
+      "audit_output_path": "output/anonymization_audit.json"
+    }
+  }
+}

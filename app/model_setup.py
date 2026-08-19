@@ -2,16 +2,15 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  SETUP.PY — Dependency Installer for PII / NER Pipeline                     ║
 # ║                                                                              ║
-# ║  Run ONCE on Kaggle before running pipeline.py:                              ║
-# ║      python setup.py                                                         ║
+# ║  Run once before running the pipeline:                                       ║
+# ║      python app/model_setup.py                                               ║
 # ║                                                                              ║
 # ║  Models downloaded to HuggingFace cache (~/.cache/huggingface/hub/):         ║
 # ║    • cfilt/HiNER-original-muril-base-cased   (~900 MB)                         ║
 # ║    • ai4bharat/IndicNER                       (~900 MB)                         ║
-# ║    • dslim/bert-base-NER                      (~430 MB)                         ║
 # ║    • Babelscape/wikineural-multilingual-ner   (~1.1 GB)                         ║
 # ║    • spaCy en_core_web_lg                      (~788 MB)                         ║
-# ║  Total disk needed: ~4.5 GB + pipeline dependencies                          ║
+# ║  Total disk needed: ~4.0 GB + pipeline dependencies                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 import subprocess
@@ -68,11 +67,6 @@ NER_MODEL_IDS = [
         "ai4bharat/IndicNER",
         "IndicNER — AI4Bharat (South Asian NER)",
         "~900 MB",
-    ),
-    (
-        "dslim/bert-base-NER",
-        "BERT-Base-NER — English CoNLL-2003",
-        "~430 MB",
     ),
     (
         "Babelscape/wikineural-multilingual-ner",
@@ -147,15 +141,15 @@ def main():
         "colorama",
     )
 
-    # ── 8. Download all 4 NER models ─────────────────────────────────────
+    # ── 8. Download all 3 multilingual NER models ─────────────────────────
     # WHY we download here and not in pipeline.py:
     #   • Kaggle kernels have no internet access during inference by default.
-    #   • Downloading in setup.py populates ~/.cache/huggingface/hub/ once.
+    #   • Downloading in model_setup.py populates ~/.cache/huggingface/hub/ once.
     #   • pipeline.py then loads from cache (offline, fast).
     #   • Each model is ~430 MB – 1.1 GB; downloading once saves runtime.
     print("\n[8] Pre-downloading NER models to HuggingFace cache …")
     print("  (Models saved to: ~/.cache/huggingface/hub/)")
-    print("  NOTE: This requires ~4.5 GB disk and internet access.\n")
+    print("  NOTE: This requires ~4.0 GB disk and internet access.\n")
 
     try:
         from transformers import AutoTokenizer, AutoModelForTokenClassification

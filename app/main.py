@@ -102,6 +102,7 @@ PII_DISPLAY_NAMES: Dict[str, str] = {
     "Phone_Number": "Phone Number",
     "Email": "Email Address",
     "Medical_UHID": "Medical UHID",
+    "Patient_ID": "Patient ID",
     "Passport": "Passport Number",
     "Driving_License": "Driving License",
     "Voter_ID": "Voter ID",
@@ -128,6 +129,7 @@ class PiiHit:
     word_no: int = 0
     start_char: int = 0
     end_char: int = 0
+    confidence: float = 1.0
 
 
 @dataclass
@@ -355,6 +357,10 @@ _PRESIDIO_LABEL_MAP = {
     "DATE_TIME": "Date",
     "IP_ADDRESS": "IP_Address",
     "MEDICAL_LICENSE": "Medical_UHID",
+    "PERSON": "Person_Name",
+    "LOCATION": "Location",
+    "GPE": "Location",
+    "ORGANIZATION": "Organization",
 }
 
 
@@ -392,6 +398,7 @@ def _run_presidio_on_line(line: str, engine) -> List[PiiHit]:
                     word_no=word_no,
                     start_char=start_char,
                     end_char=end_char,
+                    confidence=float(r.score),
                 )
             )
     except Exception:
@@ -556,6 +563,24 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                     "PPP_ID",
                     m.group(1).strip(),
                     PII_DISPLAY_NAMES["PPP_ID"],
+                    lno,
+                    get_word_number(line_str, m.start(1)),
+                    m.start(1) + 1,
+                    m.end(1),
+                )
+            )
+
+        for m in re.finditer(
+            r"(?:Patient\s*ID|Patient\s*Id|UHID|Medical\s*UHID|Health\s*ID)[_\-:\s]+([a-zA-Z0-9_\-]+)",
+            line_str,
+            re.I,
+        ):
+            hits.append(
+                PiiHit(
+                    "Contextual Regex",
+                    "Patient_ID",
+                    m.group(1).strip(),
+                    PII_DISPLAY_NAMES["Patient_ID"],
                     lno,
                     get_word_number(line_str, m.start(1)),
                     m.start(1) + 1,
@@ -773,7 +798,7 @@ def merge_pii_hits(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
+def     lue(label: str, val: str) -> Tuple[str, str, str]:
     lbl = label.upper().replace(" ", "_")
     val = val.strip()
 
@@ -933,6 +958,9 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         return ner_pipe
     except Exception as exc:
         print(f"  [NER] Could not load {model_id}: {exc}", flush=True)
+        # Cache failed loads too; batch mode processes many cells and should not
+        # retry the same unavailable/gated model for every cell.
+        _NER_PIPELINE_CACHE[model_id] = None
         return None
 
 
@@ -1163,7 +1191,7 @@ def _extract_line_spans_chunked(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run_line_by_line_ner(records: List[FileRecord]):
+def run_line_by_line_ner(records: List[FileRecord], include_bert: bool = True):
     if not _TRANSFORMERS_AVAILABLE:
         print(
             "  [NER] transformers not installed — skipping model inference.",
@@ -1179,7 +1207,11 @@ def run_line_by_line_ner(records: List[FileRecord]):
         "cfilt/HiNER-original-muril-base-cased", use_fast=False
     )
     indicner_pipe = _load_ner_pipeline("ai4bharat/IndicNER", use_fast=False)
-    bert_pipe = _load_ner_pipeline("dslim/bert-base-NER", use_fast=True)
+    bert_pipe = (
+        _load_ner_pipeline("dslim/bert-base-NER", use_fast=True)
+        if include_bert
+        else None
+    )
     xlm_pipe = _load_ner_pipeline(
         "Babelscape/wikineural-multilingual-ner", use_fast=True
     )
@@ -1187,9 +1219,10 @@ def run_line_by_line_ner(records: List[FileRecord]):
     pipes = {
         NER_MODELS["HiNER"][0]: (hiner_pipe, 0.25),
         NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.20),
-        NER_MODELS["BERT_Base_NER"][0]: (bert_pipe, 0.45),
         NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.45),
     }
+    if include_bert:
+        pipes[NER_MODELS["BERT_Base_NER"][0]] = (bert_pipe, 0.45)
 
     for rec in records:
         print(
@@ -1595,7 +1628,6 @@ def build_excel(
                 if 0 < h.line_no <= len(lines)
                 else rec.raw_text
             )
-            method, anon_val, desc = anonymize_value(h.label, h.value)
             s4_rows.append(
                 {
                     "File": rec.filename,
@@ -1614,9 +1646,6 @@ def build_excel(
                     "Original Value": h.value,
                     "Confidence Score": "1.00 (Exact Regex/Presidio)",
                     "PII / NER Tag": f"<{h.label}>{h.value}</{h.label}>",
-                    "Anonymization Method": method,
-                    "Anonymized Value": anon_val,
-                    "Method Description": desc,
                 }
             )
 
@@ -1642,7 +1671,6 @@ def build_excel(
                     )
                 )
 
-                method, anon_val, desc = anonymize_value(ent.category, ent.text)
                 s4_rows.append(
                     {
                         "File": rec.filename,
@@ -1661,9 +1689,6 @@ def build_excel(
                         "Original Value": ent.text,
                         "Confidence Score": f"{ent.score:.4f}",
                         "PII / NER Tag": f"<{ent.category}>{ent.text}</{ent.category}>",
-                        "Anonymization Method": method,
-                        "Anonymized Value": anon_val,
-                        "Method Description": desc,
                     }
                 )
 
@@ -1778,6 +1803,11 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
+        "--config",
+        default=None,
+        help="Run the config-driven dataset batch job using this JSON configuration.",
+    )
+    ap.add_argument(
         "--input",
         "-i",
         default=None,
@@ -1808,6 +1838,17 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.config is not None:
+        from batch_pipeline import run as run_batch
+        from batch_pipeline import BatchError
+
+        try:
+            run_batch(args.config)
+        except BatchError as exc:
+            print(f"[Batch][ERROR] {exc}", flush=True)
+            raise SystemExit(1)
+        return
 
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
