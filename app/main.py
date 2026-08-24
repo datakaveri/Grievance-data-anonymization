@@ -2,7 +2,7 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  PIPELINE.PY — Multi-Format PII Detection & NER Comparison Pipeline          ║
 # ║  Supports: .txt, .doc, .docx, .html files (single or folder)                 ║
-# ║  PII Detection: Regex + Presidio (Structured PII only)                      ║
+# ║  PII Detection: Regex + Presidio (Structured PII only)                       ║
 # ║  NER: 4 HuggingFace models + Hybrid (HiNER + IndicNER + XLM-RoBERTa)        ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -46,6 +46,15 @@ def ordinal(n: int) -> str:
 def get_word_number(text: str, start_char_idx: int) -> int:
     """Calculates the 1-based word index in text for a given character start position."""
     return len(text[:start_char_idx].split()) + 1
+
+
+def truecase_line(text: str) -> str:
+    """
+    Performs a 1-to-1 length-preserving title-casing transformation on words.
+    Enables cased Transformer models to recognize entities in ALL-CAPS or all-lowercase text
+    without altering character indices.
+    """
+    return re.sub(r"\b[A-Za-z]+\b", lambda m: m.group(0).capitalize(), text)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -936,37 +945,102 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         return None
 
 
+def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
+    """
+    Cleans leading and trailing punctuation, isolated single characters,
+    and slash-prefixes (e.g., 'o.Name', 'S/o Name', 'Name s') from NER spans.
+    """
+    val = text[start:end]
+
+    # 1. Strip leading punctuation, slashes, and dangling prefix letters like "o.", "s.", "d."
+    match_prefix = re.match(
+        r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+    )
+    while match_prefix and match_prefix.end() > 0:
+        cut = match_prefix.end()
+        # Ensure we don't trim valid initials if the entire name is initials
+        if cut >= len(val):
+            break
+        start += cut
+        val = text[start:end]
+        match_prefix = re.match(
+            r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+        )
+
+    # 2. Strip trailing punctuation and dangling sub-word fragments (e.g. trailing " s")
+    match_suffix = re.search(r"(\s+[a-zA-Z]|[\s:\-.,'\"/()]+)$", val)
+    while match_suffix and match_suffix.start() < len(val):
+        cut = len(val) - match_suffix.start()
+        if cut >= len(val):
+            break
+        end -= cut
+        val = text[start:end]
+        match_suffix = re.search(r"(\s+[a-zA-Z]|[\s:\-.,'\"/()]+)$", val)
+
+    return val.strip(), start, end
+
+
 def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
-    """Extends character indices outward to complete word boundaries."""
-    while start > 0 and text[start - 1].isalnum():
-        start -= 1
-    while end < len(text) and text[end].isalnum():
-        end += 1
+    """
+    Expands character indices to complete word boundaries while strictly
+    halting at delimiter boundaries (/ , ; : \\).
+    """
+    STRICT_DELIMITERS = set(" /\\:;,()[]{}<>\"'\t\n\r")
+
+    # Expand start backwards
+    while start > 0:
+        prev = text[start - 1]
+        if prev in STRICT_DELIMITERS:
+            break
+        if prev.isalnum():
+            start -= 1
+        elif (
+            prev == "."
+            and start > 1
+            and text[start - 2].isalpha()
+            and (
+                start == 2
+                or text[start - 3] in STRICT_DELIMITERS
+                or text[start - 3].isspace()
+            )
+        ):
+            start -= 1
+        else:
+            break
+
+    # Expand end forwards
+    while end < len(text):
+        nxt = text[end]
+        if nxt in STRICT_DELIMITERS:
+            break
+        if nxt.isalnum():
+            end += 1
+        elif nxt == "." and end + 1 < len(text) and text[end + 1].isalnum():
+            end += 1
+        else:
+            break
+
     return start, end
 
 
-def merge_line_spans(
-    spans: List[Dict], original_line: str
-) -> List[NerEntity]:
-    """
-    Snaps raw character spans to complete word boundaries, merges overlapping
-    spans into contiguous entities, and computes confidence score, word position,
-    and start/end letter numbers.
-    """
+def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
     if not spans:
         return []
 
     snapped_spans: List[Dict] = []
     for s in spans:
         st, en = _snap_to_word_boundary(original_line, s["start"], s["end"])
-        val = original_line[st:en].strip(" :-.,'()")
+        clean_val, st, en = _clean_entity_text(original_line, st, en)
 
-        if not val or len(val) < 2 or re.match(r"^\d+$", val):
+        # Discard false positives: empty, numeric, or document abbreviations like S.I.No
+        if (
+            not clean_val
+            or len(clean_val) < 2
+            or re.match(r"^\d+$", clean_val)
+            or re.match(r"^[A-Z]\.([A-Z]\.)+[A-Za-z]+$", clean_val)
+            # or _is_orphaned_initial(clean_val)
+        ):
             continue
-
-        word_no = get_word_number(original_line, st)
-        start_char = st + 1
-        end_char = en
 
         snapped_spans.append(
             {
@@ -974,51 +1048,75 @@ def merge_line_spans(
                 "start": st,
                 "end": en,
                 "score": float(s["score"]),
-                "text": val,
-                "word_no": word_no,
-                "start_char": start_char,
-                "end_char": end_char,
+                "text": clean_val,
+                "word_no": get_word_number(original_line, st),
+                "start_char": st + 1,
+                "end_char": en,
             }
         )
 
     if not snapped_spans:
         return []
 
+    # 1. Merge contiguous identical-category spans
     sorted_spans = sorted(
         snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"]))
     )
-    merged: List[Dict] = []
+    same_cat_merged: List[Dict] = []
 
     for s in sorted_spans:
         target = None
-        for m in merged:
+        for m in same_cat_merged:
             if m["cat"] == s["cat"] and (
-                s["start"] <= m["end"] and m["start"] <= s["end"]
+                s["start"] <= m["end"] + 1 and m["start"] <= s["end"] + 1
             ):
-                target = m
-                break
+                intervening = original_line[
+                    min(m["start"], s["start"]) : max(m["end"], s["end"])
+                ]
+                if not any(d in intervening for d in ["/", "\\", ";", ":"]):
+                    target = m
+                    break
 
         if target is None:
-            merged.append(dict(s))
+            same_cat_merged.append(dict(s))
         else:
-            new_start = min(target["start"], s["start"])
-            new_end = max(target["end"], s["end"])
-            target["start"] = new_start
-            target["end"] = new_end
-            target["text"] = original_line[new_start:new_end].strip(" :-.,'()")
+            target["start"] = min(target["start"], s["start"])
+            target["end"] = max(target["end"], s["end"])
+            target_text, t_st, t_en = _clean_entity_text(
+                original_line, target["start"], target["end"]
+            )
+            target["text"] = target_text
+            target["start"] = t_st
+            target["end"] = t_en
             target["score"] = max(target["score"], s["score"])
-            target["word_no"] = get_word_number(original_line, new_start)
-            target["start_char"] = new_start + 1
-            target["end_char"] = new_end
+            target["word_no"] = get_word_number(original_line, target["start"])
+            target["start_char"] = target["start"] + 1
+            target["end_char"] = target["end"]
 
-    merged.sort(key=lambda x: x["start"])
+    # 2. Non-Maximum Suppression (Longest span with highest confidence)
+    same_cat_merged.sort(key=lambda x: (-(x["end"] - x["start"]), -x["score"]))
+    final_merged: List[Dict] = []
+
+    for candidate in same_cat_merged:
+        if not any(
+            candidate["start"] < chosen["end"]
+            and chosen["start"] < candidate["end"]
+            for chosen in final_merged
+        ):
+            final_merged.append(candidate)
+
+    final_merged.sort(key=lambda x: x["start"])
 
     entities: List[NerEntity] = []
     seen = set()
-    for m in merged:
+    for m in final_merged:
         clean_val = m["text"]
-        if clean_val and len(clean_val) >= 2:
-            key = (m["cat"], clean_val.lower())
+        if (
+            clean_val
+            and len(clean_val) >= 2
+            # and not _is_orphaned_initial(clean_val)
+        ):
+            key = (m["cat"], clean_val.lower(), m["start"])
             if key not in seen:
                 seen.add(key)
                 entities.append(
@@ -1038,7 +1136,7 @@ def merge_line_spans(
 def _extract_raw_spans(
     pipe,
     line_str: str,
-    min_score: float = 0.25,
+    min_score: float = 0.20,
     model_name: str = "",
 ) -> List[Dict]:
     if pipe is None or not line_str.strip():
@@ -1128,7 +1226,7 @@ def _chunk_line_with_offsets(
 def _extract_line_spans_chunked(
     pipe,
     line_str: str,
-    min_score: float = 0.25,
+    min_score: float = 0.20,
     model_name: str = "",
 ) -> List[Dict]:
     if pipe is None or not line_str.strip():
@@ -1158,6 +1256,33 @@ def _extract_line_spans_chunked(
     return all_spans
 
 
+def extract_dual_pass_ner_spans(
+    pipe,
+    line_str: str,
+    min_score: float = 0.20,
+    model_name: str = "",
+) -> List[Dict]:
+    """
+    Performs pure model inference in two passes:
+      1. Verbatim Pass: processes line_str as written.
+      2. Truecased Pass: processes truecase_line(line_str).
+    Because truecase_line preserves character length and index offsets exactly,
+    spans detected in both passes map 100% cleanly to original text character offsets.
+    """
+    spans_verbatim = _extract_line_spans_chunked(
+        pipe, line_str, min_score=min_score, model_name=model_name
+    )
+
+    tc_line = truecase_line(line_str)
+    spans_tc = []
+    if tc_line != line_str:
+        spans_tc = _extract_line_spans_chunked(
+            pipe, tc_line, min_score=min_score, model_name=model_name
+        )
+
+    return spans_verbatim + spans_tc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN NER RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1185,10 +1310,10 @@ def run_line_by_line_ner(records: List[FileRecord]):
     )
 
     pipes = {
-        NER_MODELS["HiNER"][0]: (hiner_pipe, 0.25),
+        NER_MODELS["HiNER"][0]: (hiner_pipe, 0.20),
         NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.20),
-        NER_MODELS["BERT_Base_NER"][0]: (bert_pipe, 0.45),
-        NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.45),
+        NER_MODELS["BERT_Base_NER"][0]: (bert_pipe, 0.35),
+        NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.35),
     }
 
     for rec in records:
@@ -1210,12 +1335,15 @@ def run_line_by_line_ner(records: List[FileRecord]):
             model_raw_spans: Dict[str, List[Dict]] = {}
             model_line_ents: Dict[str, List[NerEntity]] = {}
 
+            # Dual-pass pure neural model inference
             for model_lbl, (pipe, threshold) in pipes.items():
-                spans = _extract_line_spans_chunked(
+                spans = extract_dual_pass_ner_spans(
                     pipe, original_line, min_score=threshold, model_name=model_lbl
                 )
                 model_raw_spans[model_lbl] = spans
-                model_line_ents[model_lbl] = merge_line_spans(spans, original_line)
+                model_line_ents[model_lbl] = merge_line_spans(
+                    spans, original_line
+                )
 
             # Ensemble Hybrid: HiNER + IndicNER + XLM-RoBERTa
             hybrid_spans = (
