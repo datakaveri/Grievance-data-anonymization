@@ -85,11 +85,17 @@ try:
 except ImportError:
     _BS4_AVAILABLE = False
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DEFAULT PATHS & CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_INPUT_PATH = "/kaggle/input/datasets/gogul0604/text-dataset"
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+DEFAULT_INPUT_PATH = "/home/gogul/Documents/Grievance-data-anonymization/app/data/sample_complaint.txt"
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
+DEFAULT_HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+
+
 
 NER_MODELS: Dict[str, Tuple[str, str]] = {
     "HiNER": (
@@ -921,7 +927,7 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
     if not _TRANSFORMERS_AVAILABLE:
         return None
     try:
-        hf_token = os.getenv("HF_TOKEN") or None
+        hf_token = os.getenv("HF_TOKEN", DEFAULT_HF_TOKEN).strip() or None
         tokenizer = AutoTokenizer.from_pretrained(
             model_id,
             token=hf_token,
@@ -1926,7 +1932,7 @@ def parse_args():
     )
     ap.add_argument(
         "--hf_token",
-        default=os.getenv("HF_TOKEN", ""),
+        default=DEFAULT_HF_TOKEN,
         help="HuggingFace token (for gated models such as IndicNER).",
     )
     if any("jupyter" in arg or "kernel" in arg for arg in sys.argv):

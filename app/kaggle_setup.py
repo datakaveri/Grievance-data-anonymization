@@ -18,20 +18,21 @@ import subprocess
 import sys
 import os
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HuggingFace token (needed for gated models; set in Kaggle Secrets)
-# ─────────────────────────────────────────────────────────────────────────────
-os.environ["HF_TOKEN"]               = os.getenv("HF_TOKEN", "").strip()
-os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 if HF_TOKEN:
-    os.environ["HF_TOKEN"]                 = HF_TOKEN
-    os.environ["HUGGING_FACE_HUB_TOKEN"]  = HF_TOKEN
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
 else:
-    # Clear empty token env vars to prevent sending empty Authorization headers
     os.environ.pop("HF_TOKEN", None)
     os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
+
+
 
 
 def run(*args, check=True, **kwargs):

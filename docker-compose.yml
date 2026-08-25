@@ -4,8 +4,11 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: grievance_anonymizer
+    env_file:
+      - .env
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
+
     volumes:
       - ./data:/app/data
       - ./output:/app/output

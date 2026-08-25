@@ -63,6 +63,7 @@ Grievance-data-anonymization/
 │   └── kaggle_setup.py     # Automated environment setup & model pre-downloader script
 ├── data/                   # Input folder for document datasets (.txt, .docx, .doc, .html)
 ├── output/                 # Output directory for generated Excel (.xlsx) and JSON (.json) reports
+├── .env.example            # Environment variable template for HuggingFace token
 ├── Dockerfile              # Docker container definition with model pre-caching
 ├── docker-compose.yml      # Docker Compose configuration with volume mounts
 ├── requirements.txt        # Python dependency specifications
@@ -89,20 +90,28 @@ cd Grievance-data-anonymization
 python3 -m venv venv
 source venv/bin/activate
 
-# 3. Automated Dependency & Model Setup (Downloads spaCy & 4 NER models to cache)
+# 3. Create .env file for Hugging Face authentication
+cp .env.example .env
+# Edit .env and add your HF Access Token: HF_TOKEN=hf_your_token_here
+```
+
+> [!IMPORTANT]
+> **Hugging Face Access Token & Gated Models (`IndicNER`):**
+> Gated models like `ai4bharat/IndicNER` require a Hugging Face Read Access Token in your `.env` file.
+> - If you use your own HF Token, make sure your HF account has accepted the terms once at [huggingface.co/ai4bharat/IndicNER](https://huggingface.co/ai4bharat/IndicNER).
+> - Once accepted for your account (or if using a pre-authorized token), setup and downloading run 100% automatically across all machines without any website prompts.
+
+```bash
+# 4. Automated Dependency & Model Setup (Downloads spaCy & 4 NER models to cache)
 python app/kaggle_setup.py
 
-# OR Manual Setup
-pip install -r requirements.txt
-python -m spacy download en_core_web_lg
-
-# 4. Create data and output folders
+# 5. Create data and output folders
 mkdir -p data output
 
-# 5. Run pipeline on input folder/file
-python app/main.py --input data --output output/pii_ner_report.xlsx
+# 6. Run pipeline on input folder or file
+python app/main.py --input app/data/sample_complaint.txt --output output/pii_ner_report.xlsx
 
-# 6. OR Run pipeline directly on an inline text string
+# 7. OR Run pipeline directly on an inline text string
 python app/main.py --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123, email: ramesh@example.com" --output output/inline_report.xlsx
 ```
 
