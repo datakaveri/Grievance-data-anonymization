@@ -1,0 +1,38 @@
+{
+  "complaints": [
+    {
+      "complaint_id": "GRV-2024-1001",
+      "filed_on": "12-03-2024",
+      "complainant": "Smt. Kavita Sharma",
+      "age": 42,
+      "address": "House No. 14, Sector 8, Karnal, Haryana - 132001",
+      "contact": {
+        "phone": "9876543210",
+        "email": "kavita.sharma@example.com"
+      },
+      "identifiers": {
+        "aadhaar": "2345 6789 0123",
+        "pan": "ABCDE1234F",
+        "voter_id": "ABC1234567"
+      },
+      "narrative": "Smt. Kavita Sharma of Karnal reports that Dr. Ramesh Kumar at Civil Hospital, Karnal delayed treatment. Bank account 123456789012 at SBI Karnal (IFSC SBIN0001234) was also misused. Please contact her at 9876543210."
+    },
+    {
+      "complaint_id": "GRV-2024-1002",
+      "filed_on": "28-02-2013",
+      "complainant": "Sri N. Raghuma Reddy",
+      "age": 45,
+      "address": "Maruthi Nagar, Champapet, Hyderabad, Telangana - 500079",
+      "contact": {
+        "phone": "9123456780",
+        "email": "n.raghuma.reddy@example.com"
+      },
+      "identifiers": {
+        "aadhaar": "3456 7890 1234",
+        "pan": "FGHIJ5678K",
+        "passport": "N1234567"
+      },
+      "narrative": "Sri N.RAGHUMA REDDY, S/o JANGA REDDY, Hyderabad, alleges that Smt. MANTHENA RAJYYAMMA of Kukatpally, Ranga Reddy District sold plot No.303 without a clear title. Document No.15567/2006 dated 20-09-2006 is attached."
+    }
+  ]
+}

@@ -120,13 +120,15 @@ def main():
     )
 
     # ── 4. spaCy (for Presidio) ───────────────────────────────────────────
-    print("\n[4] Installing spaCy and downloading en_core_web_lg …")
-    pip_install("spacy>=3.7.0")
-    run(sys.executable, "-m", "spacy", "download", "en_core_web_lg", "--quiet")
+    # (COMMENTED OUT as requested - uncomment to install spaCy and download en_core_web_lg)
+    # print("\n[4] Installing spaCy and downloading en_core_web_lg …")
+    # pip_install("spacy>=3.7.0")
+    # run(sys.executable, "-m", "spacy", "download", "en_core_web_lg", "--quiet")
 
     # ── 5. Presidio ───────────────────────────────────────────────────────
-    print("\n[5] Installing Presidio Analyzer + Anonymizer …")
-    pip_install("presidio-analyzer", "presidio-anonymizer")
+    # (COMMENTED OUT as requested - uncomment to install Presidio Analyzer + Anonymizer)
+    # print("\n[5] Installing Presidio Analyzer + Anonymizer …")
+    # pip_install("presidio-analyzer", "presidio-anonymizer")
 
     # ── 6. Document reading libs ──────────────────────────────────────────
     print("\n[6] Installing python-docx and BeautifulSoup4 …")
