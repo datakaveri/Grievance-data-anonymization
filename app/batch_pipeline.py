@@ -47,6 +47,46 @@ def _path(value: str, root: Path) -> Path:
     return candidate if candidate.is_absolute() else root / candidate
 
 
+_RESERVED_CONFIG_NAMES = {"pipeline_config.json"}
+
+
+def _resolve_config_file(config_arg: Path) -> Path:
+    """Locate the dataset config JSON.
+
+    Accepts either a direct file path (local/manual runs, e.g. `config/config.json`)
+    or a directory to scan. The real deployment doesn't control what the UI names
+    this file, so scanning mirrors `_resolve_source_input`'s convention:
+      - exactly one .json (other than reserved names) -> use it, whatever it's called
+      - a file literally named config.json -> preferred, even alongside others
+      - none -> error (nothing to run)
+      - more than one, none named config.json -> error naming the candidates
+
+    `pipeline_config.json` is excluded: it's skald-image's config (see
+    fetch_data.py:220, which treats its presence as the image-job signal) and
+    must never be mistaken for this app's config.
+    """
+    if config_arg.is_file():
+        return config_arg
+    if not config_arg.is_dir():
+        raise BatchError(f"Config path not found: {config_arg}")
+
+    candidates = sorted(
+        p for p in config_arg.iterdir()
+        if p.is_file() and p.suffix.lower() == ".json" and p.name not in _RESERVED_CONFIG_NAMES
+    )
+    if not candidates:
+        raise BatchError(f"No config JSON found in {config_arg}")
+    preferred = next((p for p in candidates if p.name == "config.json"), None)
+    if preferred is not None:
+        return preferred
+    if len(candidates) > 1:
+        raise BatchError(
+            f"Expected exactly one config JSON in {config_arg}, found {len(candidates)}: "
+            f"{[p.name for p in candidates]}"
+        )
+    return candidates[0]
+
+
 def _load_config(config_path: Path) -> dict[str, Any]:
     try:
         with config_path.open(encoding="utf-8") as fh:
@@ -272,9 +312,11 @@ def _sanitize(text: str, minimum_confidence: float, column: str, salts: dict[str
 
 
 def run(config_path: str, root: str | None = None) -> dict[str, Any]:
-    config_file = Path(config_path).resolve()
-    # In the container, config/config.json and data/... are siblings under /app.
-    work_root = Path(root).resolve() if root else config_file.parent.parent
+    config_arg = Path(config_path).resolve()
+    config_file = _resolve_config_file(config_arg)
+    config_dir = config_arg if config_arg.is_dir() else config_file.parent
+    # In the container, config/ and data/... are siblings under /app.
+    work_root = Path(root).resolve() if root else config_dir.parent
     dataset = _load_config(config_file)
     source = _resolve_source_input(dataset, work_root)
     settings = dataset.get("free_text_anonymization", {})
@@ -345,7 +387,11 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Config-driven dataset free-text anonymization")
-    parser.add_argument("--config", required=True, help="Path to the JSON configuration")
+    parser.add_argument(
+        "--config",
+        required=True,
+        help="Path to the JSON configuration file, or a directory to scan for one",
+    )
     parser.add_argument("--root", default=None, help="Base directory for relative paths")
     args = parser.parse_args()
     try:

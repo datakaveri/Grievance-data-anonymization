@@ -2437,7 +2437,7 @@ def parse_args():
     ap.add_argument(
         "--config",
         default=None,
-        help="Run the config-driven dataset batch job using this JSON configuration.",
+        help="Run the config-driven dataset batch job using this JSON config file or a directory to scan for one.",
     )
     ap.add_argument(
         "--input",
