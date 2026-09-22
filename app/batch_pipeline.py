@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,22 +17,22 @@ import pandas as pd
 
 try:
     from main import (
-        FileRecord,
+        NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
         full_pii_scan,
         merge_pii_hits,
-        run_line_by_line_ner,
+        run_corpus_line_ner,
         _TRANSFORMERS_AVAILABLE,
     )
 except ModuleNotFoundError:  # Supports `python -m app.batch_pipeline` too.
     from .main import (
-        FileRecord,
+        NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
         full_pii_scan,
         merge_pii_hits,
-        run_line_by_line_ner,
+        run_corpus_line_ner,
         _TRANSFORMERS_AVAILABLE,
     )
 
@@ -176,25 +177,29 @@ def _cell_hits(text: str) -> list[PiiHit]:
     return merge_pii_hits(regex_hits, presidio_hits)
 
 
+def _line_bases(text: str) -> list[int]:
+    """Cell-relative offset of each line's first non-whitespace character.
+
+    Detection runs on line.strip(), so a hit's offsets are relative to the
+    stripped line; adding the base restores the cell-relative position.
+    """
+    bases: list[int] = []
+    cursor = 0
+    for line in text.splitlines(keepends=True):
+        bases.append(cursor + len(line) - len(line.lstrip()))
+        cursor += len(line)
+    return bases
+
+
 def _absolute_hits(text: str) -> list[tuple[int, int, PiiHit]]:
     """Convert line-relative hit offsets into cell-relative zero-based offsets."""
-    hits = _cell_hits(text)
-    lines = text.splitlines(keepends=True)
-    starts: list[int] = []
-    cursor = 0
-    for line in lines:
-        starts.append(cursor)
-        cursor += len(line)
+    bases = _line_bases(text)
     result = []
-    for hit in hits:
-        if hit.line_no < 1 or hit.line_no > len(starts):
+    for hit in _cell_hits(text):
+        if hit.line_no < 1 or hit.line_no > len(bases):
             continue
-        raw_line = lines[hit.line_no - 1]
-        # Detection runs on line.strip(), so restore the removed leading space.
-        leading = len(raw_line) - len(raw_line.lstrip())
-        start = starts[hit.line_no - 1] + leading + max(hit.start_char - 1, 0)
-        end = starts[hit.line_no - 1] + leading + hit.end_char
-        result.append((start, end, hit))
+        base = bases[hit.line_no - 1]
+        result.append((base + max(hit.start_char - 1, 0), base + hit.end_char, hit))
     return result
 
 
@@ -241,34 +246,74 @@ def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]
     return hashlib.sha256((salt + value).encode()).hexdigest(), "salted_hash"
 
 
-def _absolute_ner_hits(text: str) -> list[dict[str, Any]]:
-    record = FileRecord(path="<cell>", filename="<cell>", file_type="string", language=detect_language(text), raw_text=text)
-    run_line_by_line_ner([record], include_bert=False)
-    results: list[dict[str, Any]] = []
-    lines = text.splitlines(keepends=True)
-    starts: list[int] = []
-    cursor = 0
-    for line in lines:
-        starts.append(cursor)
-        cursor += len(line)
-    for line_result in record.line_ners.get("Hybrid (HiNER + IndicNER + XLM-RoBERTa)", []):
-        if line_result.line_no < 1 or line_result.line_no > len(starts):
-            continue
-        raw_line = lines[line_result.line_no - 1]
-        leading = len(raw_line) - len(raw_line.lstrip())
-        for entity in line_result.entities:
-            results.append({
-                "start": starts[line_result.line_no - 1] + leading + entity.start_char - 1,
-                "end": starts[line_result.line_no - 1] + leading + entity.end_char,
-                "label": entity.category,
-                "source": "Hybrid NER",
-                "confidence": entity.score,
-                "value": entity.text,
-            })
-    return results
+# run_line_by_line_ner's dispatcher drops blank and sub-3-char lines rather than
+# paying a model pass for them; the corpus builder below mirrors that.
+_MIN_NER_LINE_CHARS = 3
 
 
-def _sanitize(text: str, minimum_confidence: float, column: str, salts: dict[str, str]) -> tuple[str, list[dict[str, Any]]]:
+def _ner_lines(text: str) -> list[tuple[int, str]]:
+    """(line index, stripped line) for the lines worth sending to the models."""
+    result = []
+    for line_idx, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if len(stripped) >= _MIN_NER_LINE_CHARS:
+            result.append((line_idx, stripped))
+    return result
+
+
+def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[str, Any]]]:
+    """Run hybrid NER once over every distinct line in the job.
+
+    This used to run per cell: each call re-orchestrated the model worker threads
+    and queues to infer a single short line, so the mini-batching never engaged and
+    a phrase repeated across thousands of rows was embedded thousands of times.
+    Here every distinct line in the corpus is inferred exactly once, in real
+    mini-batches, and the resulting spans are projected back onto each text that
+    contains that line.
+
+    Returns {text: [hit dicts with cell-relative offsets]}.
+    """
+    line_ids: dict[str, int] = {}
+    corpus: list[str] = []
+    for text in texts:
+        for _, stripped in _ner_lines(text):
+            if stripped not in line_ids:
+                line_ids[stripped] = len(corpus)
+                corpus.append(stripped)
+
+    print(
+        f"[Batch] Hybrid NER over {len(corpus)} distinct lines "
+        f"from {len(texts)} distinct values …",
+        flush=True,
+    )
+    entities = run_corpus_line_ner(corpus, batch_size=batch_size, release_models=True)
+
+    index: dict[str, list[dict[str, Any]]] = {}
+    for text in texts:
+        bases = _line_bases(text)
+        hits: list[dict[str, Any]] = []
+        for line_idx, stripped in _ner_lines(text):
+            base = bases[line_idx]
+            for entity in entities[line_ids[stripped]]:
+                hits.append({
+                    "start": base + entity.start_char - 1,
+                    "end": base + entity.end_char,
+                    "label": entity.category,
+                    "source": "Hybrid NER",
+                    "confidence": entity.score,
+                    "value": entity.text,
+                })
+        index[text] = hits
+    return index
+
+
+def _sanitize(
+    text: str,
+    minimum_confidence: float,
+    column: str,
+    salts: dict[str, str],
+    ner_hits: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(text, str) or not text:
         return text, []
 
@@ -278,7 +323,7 @@ def _sanitize(text: str, minimum_confidence: float, column: str, salts: dict[str
         for start, end, hit in _absolute_hits(text)
         if hit.confidence >= minimum_confidence
     ]
-    detections.extend(item for item in _absolute_ner_hits(text) if item["confidence"] >= minimum_confidence)
+    detections.extend(item for item in ner_hits if item["confidence"] >= minimum_confidence)
     hits = sorted(detections, key=lambda item: (item["start"], item["end"]))
     if not hits:
         return text, []
@@ -344,25 +389,65 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
         raise BatchError(f"Configured columns are missing from input: {missing}")
 
     minimum_confidence = float(settings.get("minimum_confidence", 0.0))
+    batch_size = int(settings.get("ner_batch_size", NER_CORPUS_BATCH_SIZE))
     audit: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     # One random salt per column, generated once for this run (mirrors SKALD's hashing_with_salt).
     column_hash_salts: dict[str, str] = {}
-    for row_index in range(len(df)):
-        for column in columns:
-            value = df.iat[row_index, df.columns.get_loc(column)]
+    column_locs = {column: df.columns.get_loc(column) for column in columns}
+    started = time.time()
+
+    # Pass 1 — collect the distinct values we actually have to anonymize.
+    # Grievance free text repeats heavily (four in five complaint bodies in a real
+    # PHED export are duplicates), and the sanitized form of a value depends only
+    # on (value, column), so each distinct pair is computed once however many rows
+    # carry it.
+    distinct: set[str] = set()
+    for column in columns:
+        for value in df.iloc[:, column_locs[column]].tolist():
+            if isinstance(value, str) and value:
+                distinct.add(value)
+    texts = sorted(distinct)
+    print(
+        f"[Batch] {len(df)} rows x {len(columns)} column(s); {len(texts)} distinct values.",
+        flush=True,
+    )
+
+    # Pass 2 — one NER sweep over the whole corpus, then apply the policy.
+    ner_index = _build_ner_index(texts, batch_size) if texts else {}
+    sanitized_cache: dict[tuple[str, str], tuple[str, list[dict[str, Any]]]] = {}
+    for column in columns:
+        loc = column_locs[column]
+        values = df.iloc[:, loc].tolist()
+        for row_index, value in enumerate(values):
             if not isinstance(value, str) or not value:
                 continue
             try:
-                sanitized, accepted = _sanitize(value, minimum_confidence, column, column_hash_salts)
+                key = (column, value)
+                if key not in sanitized_cache:
+                    sanitized_cache[key] = _sanitize(
+                        value,
+                        minimum_confidence,
+                        column,
+                        column_hash_salts,
+                        ner_index.get(value, []),
+                    )
+                sanitized, accepted = sanitized_cache[key]
                 if accepted:
-                    df.iat[row_index, df.columns.get_loc(column)] = sanitized
+                    values[row_index] = sanitized
                 for item in accepted:
                     audit.append({"row": row_index + 1, "column": column, **item})
             except Exception as exc:
                 failures.append({"row": row_index + 1, "column": column, "error": str(exc)})
                 if on_failure == "fail":
                     raise BatchError(f"Anonymization failed at row {row_index + 1}, column {column!r}: {exc}") from exc
+        df.isetitem(loc, values)
+    # Pass 2 walks column-major for cheap bulk column reads; the audit is still
+    # emitted row-major, in configured column order, as consumers expect.
+    column_order = {column: rank for rank, column in enumerate(columns)}
+    audit.sort(key=lambda item: (item["row"], column_order[item["column"]]))
+    failures.sort(key=lambda item: (item["row"], column_order[item["column"]]))
+    print(f"[Batch] Anonymization took {time.time() - started:.1f}s", flush=True)
 
     staged = _path(settings.get("staged_input_path", ""), work_root)
     if not staged.name:

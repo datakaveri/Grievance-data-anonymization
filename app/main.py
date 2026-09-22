@@ -21,6 +21,7 @@ os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import re
 import sys
 import threading
+import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1079,6 +1080,26 @@ _NER_INFER_LOCK = None
 
 _NER_PIPELINE_CACHE: Dict[str, object] = {}
 
+# Dynamic INT8 quantization of the Linear layers. Faster, but on the PHED corpus
+# it recovered 386 entities where fp32 found 481, with only 290 shared — for a
+# redaction pipeline that is a fifth of the names and locations going unmasked,
+# so it stays off unless a deployment has measured the trade-off on its own data.
+_NER_QUANTIZE = os.getenv("NER_QUANTIZE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _maybe_quantize(model, model_id: str):
+    if not _NER_QUANTIZE or _NER_DEVICE != -1:
+        return model
+    try:
+        quantized = _torch.ao.quantization.quantize_dynamic(
+            model, {_torch.nn.Linear}, dtype=_torch.qint8
+        )
+        print(f"  [NER] Quantized {model_id} to INT8 (dynamic).", flush=True)
+        return quantized
+    except Exception as exc:
+        print(f"  [NER] INT8 quantization unavailable for {model_id}: {exc}", flush=True)
+        return model
+
 
 def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]:
     if model_id in _NER_PIPELINE_CACHE:
@@ -1096,6 +1117,8 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
             model_id,
             token=hf_token,
         )
+        model.eval()
+        model = _maybe_quantize(model, model_id)
         ner_pipe = _hf_pipeline(
             task="ner",
             model=model,
@@ -1363,19 +1386,26 @@ def _parse_ner_items(
     return raw_spans
 
 
-def _run_hf_pipe(pipe, texts):
-    """Run a HuggingFace NER pipe with torch.inference_mode() for optimized CPU execution."""
+def _run_hf_pipe(pipe, texts, batch_size: Optional[int] = None):
+    """Run a HuggingFace NER pipe with torch.inference_mode() for optimized CPU execution.
+
+    A HuggingFace pipeline handed a list still defaults to batch_size=1, i.e. one
+    forward pass per item — passing the list alone buys nothing. `batch_size` opts
+    into real tensor batching; leave it None to keep the one-at-a-time behaviour.
+    """
+    kwargs = {} if batch_size is None else {"batch_size": batch_size}
+
     if _TRANSFORMERS_AVAILABLE and hasattr(_torch, "inference_mode"):
         with _torch.inference_mode():
             if _NER_INFER_LOCK is not None:
                 with _NER_INFER_LOCK:
-                    return pipe(texts)
-            return pipe(texts)
+                    return pipe(texts, **kwargs)
+            return pipe(texts, **kwargs)
 
     if _NER_INFER_LOCK is not None:
         with _NER_INFER_LOCK:
-            return pipe(texts)
-    return pipe(texts)
+            return pipe(texts, **kwargs)
+    return pipe(texts, **kwargs)
 
 
 def _extract_raw_spans(
@@ -1519,6 +1549,7 @@ def _infer_line_batch(
     tasks: List[LineTask],
     min_score: float,
     model_name: str,
+    batch_size: Optional[int] = None,
 ) -> List[ModelLineResult]:
     """Mini-batch short lines through the pipe; chunk long lines individually."""
     results: List[ModelLineResult] = []
@@ -1563,7 +1594,7 @@ def _infer_line_batch(
 
         texts = [req[2] for req in batch_requests]
         try:
-            raw = _run_hf_pipe(pipe, texts)
+            raw = _run_hf_pipe(pipe, texts, batch_size=batch_size)
             batched = _normalize_pipe_batch_output(raw, len(texts))
             for (task, is_tc, text_str), items in zip(batch_requests, batched):
                 spans = _parse_ner_items(
@@ -1698,6 +1729,148 @@ def _store_line_ner_results(
                 missed=missed,
             )
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CORPUS-LEVEL NER (batch jobs)
+# ─────────────────────────────────────────────────────────────────────────────
+# run_line_by_line_ner() below is built for interactive document runs: every call
+# spins up one worker thread per model, four queues and a fan-in loop. That cost
+# is amortised over a whole document, but a dataset job calling it once per table
+# cell pays the full setup to infer a single line, over and over.
+# run_corpus_line_ner() is the batch-shaped counterpart: the same models and the
+# same merge semantics as HYBRID_KEY, run straight over every line in the job at
+# once — no threads, no queues, and each distinct line inferred exactly once.
+
+# Lines handed to _infer_line_batch per call. This is bookkeeping only — it sets
+# progress granularity, not how much work a forward pass does.
+NER_CORPUS_BATCH_SIZE = int(os.getenv("NER_CORPUS_BATCH_SIZE", "256"))
+
+# Real tensor batching. Every sequence in a batch pads up to the batch's longest,
+# so the gain does not grow with batch size — past the optimum, padding waste
+# overtakes it. On the PHED export (172k distinct lines, mean 48 chars) the best
+# size tracked the thread count: at 2 threads 8 won every repeat (43 vs 63 ms/line
+# one-at-a-time, with 16 at 52 and 32 at 64), while at 4 threads 16 won. 0 picks a
+# size from that relationship; set an explicit value to pin it, or 1 to batch off.
+NER_TENSOR_BATCH_SIZE = int(os.getenv("NER_TENSOR_BATCH_SIZE", "0"))
+
+
+def _tensor_batch_size() -> int:
+    if NER_TENSOR_BATCH_SIZE > 0:
+        return NER_TENSOR_BATCH_SIZE
+    return max(8, 4 * _torch.get_num_threads())
+
+# 0 means "leave torch's thread count alone". Raising it is not reliably a win:
+# on a hybrid-core laptop CPU (a few performance cores plus several efficiency
+# cores) spreading one short sequence over every core measured *slower* than the
+# module-level cap of 4, so this is an opt-in knob to tune per machine rather
+# than a default that assumes more cores are better.
+NER_TORCH_THREADS = int(os.getenv("NER_TORCH_THREADS", "0"))
+
+# (display label, model id, use_fast, min score) — mirrors run_line_by_line_ner's
+# `pipes` mapping, which is what HYBRID_KEY merges.
+_HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
+    (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.20),
+    (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.20),
+    (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.45),
+]
+
+
+def run_corpus_line_ner(
+    lines: List[str],
+    batch_size: int = NER_CORPUS_BATCH_SIZE,
+    release_models: bool = False,
+) -> List[List[NerEntity]]:
+    """Hybrid NER over a whole corpus of lines, returning one entity list per line.
+
+    Output is positionally aligned with `lines` and carries the same merged
+    entities that run_line_by_line_ner stores under HYBRID_KEY.
+
+    Lines are length-sorted so that if tensor batching is enabled (see
+    NER_TENSOR_BATCH_SIZE) each batch pads to roughly its own longest member
+    rather than the corpus maximum. Models run one after another over the full
+    corpus rather than concurrently: on CPU they would otherwise fight over the
+    same torch thread pool, and holding one model resident at a time keeps peak
+    RSS to roughly a third.
+
+    release_models evicts each pipe from the cache once its pass is done — worth
+    it for a one-shot batch job, where nothing reuses the weights afterwards.
+    """
+    if not lines:
+        return []
+    if not _TRANSFORMERS_AVAILABLE:
+        print("  [NER] transformers not installed — skipping model inference.", flush=True)
+        return [[] for _ in lines]
+
+    batch_size = max(1, batch_size)
+    # Longest first: the slowest batches land while the run is young, so the
+    # throughput estimate printed below settles on a pessimistic figure early.
+    order = sorted(range(len(lines)), key=lambda i: len(lines[i]), reverse=True)
+    spans_per_line: List[List[Dict]] = [[] for _ in lines]
+
+    previous_threads = _torch.get_num_threads()
+    if NER_TORCH_THREADS > 0:
+        _torch.set_num_threads(NER_TORCH_THREADS)
+    try:
+        return _corpus_ner_passes(lines, order, spans_per_line, batch_size, release_models)
+    finally:
+        _torch.set_num_threads(previous_threads)
+
+
+def _corpus_ner_passes(
+    lines: List[str],
+    order: List[int],
+    spans_per_line: List[List[Dict]],
+    batch_size: int,
+    release_models: bool,
+) -> List[List[NerEntity]]:
+    """One full-corpus pass per model, then merge each line's spans (see caller)."""
+    tensor_batch = _tensor_batch_size()
+    print(
+        f"  [NER] {len(lines)} lines, tensor batch {tensor_batch}, "
+        f"{_torch.get_num_threads()} torch threads",
+        flush=True,
+    )
+    for label, model_id, use_fast, min_score in _HYBRID_NER_SPECS:
+        pipe = _load_ner_pipeline(model_id, use_fast=use_fast)
+        if pipe is None:
+            print(f"  [NER] {label}: unavailable, skipped.", flush=True)
+            continue
+
+        started = time.time()
+        done = 0
+        for offset in range(0, len(order), batch_size):
+            chunk = order[offset : offset + batch_size]
+            tasks = [LineTask(doc_id=0, line_no=i, line_text=lines[i]) for i in chunk]
+            for result in _infer_line_batch(
+                pipe, tasks, min_score, label, batch_size=tensor_batch,
+            ):
+                if result.error:
+                    print(
+                        f"  [NER] {label} error on line {result.line_no}: {result.error}",
+                        flush=True,
+                    )
+                spans_per_line[result.line_no].extend(result.spans)
+            done += len(chunk)
+            if offset and (offset // batch_size) % 25 == 0:
+                rate = done / max(time.time() - started, 1e-6)
+                remaining = (len(order) - done) / max(rate, 1e-6)
+                print(
+                    f"  [NER] {label}: {done}/{len(order)} lines "
+                    f"({rate:.1f} lines/s, ~{remaining / 60:.1f} min left)",
+                    flush=True,
+                )
+
+        print(
+            f"  [NER] {label}: {len(order)} lines in {time.time() - started:.1f}s",
+            flush=True,
+        )
+        if release_models:
+            _NER_PIPELINE_CACHE.pop(model_id, None)
+            del pipe
+            gc.collect()
+
+    return [merge_line_spans(spans_per_line[i], lines[i]) for i in range(len(lines))]
 
 
 def run_line_by_line_ner(

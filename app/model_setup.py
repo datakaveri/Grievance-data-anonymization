@@ -76,7 +76,70 @@ NER_MODEL_IDS = [
 ]
 
 
+def prefetch_models(max_workers: int = 3) -> int:
+    """Download every runtime NER model into the HuggingFace cache, in parallel.
+
+    Downloading is network-bound, so fetching the models concurrently costs about
+    as long as the slowest one instead of the sum. (hf_transfer already
+    parallelises chunks *within* one file; this parallelises across files.)
+
+    This runs at image build time. At run time the pipeline reads the cache and
+    fetches nothing, so this does not change how long an anonymization job takes
+    — it only shortens the build.
+
+    The (model, use_fast) pairs come from main._HYBRID_NER_SPECS so the build
+    caches exactly the tokenizer variant the pipeline asks for later. That
+    matters: caching a tokenizer as slow when the pipeline loads it fast is a
+    cache miss, and inside an offline TEE a cache miss is a failure, not a
+    download.
+
+    Returns the number of models that failed, so the caller decides what is
+    fatal. A gated repo without a token (IndicNER) is reported, not raised.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from transformers import AutoTokenizer, AutoModelForTokenClassification
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from main import _HYBRID_NER_SPECS
+
+    token = os.getenv("HF_TOKEN", "").strip() or None
+
+    def fetch(spec):
+        _label, model_id, use_fast, _min_score = spec
+        try:
+            AutoTokenizer.from_pretrained(model_id, use_fast=use_fast, token=token)
+            AutoModelForTokenClassification.from_pretrained(model_id, token=token)
+            return model_id, None
+        except Exception as exc:
+            return model_id, exc
+
+    print(f"\n  Fetching {len(_HYBRID_NER_SPECS)} models with {max_workers} workers …", flush=True)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = list(pool.map(fetch, _HYBRID_NER_SPECS))
+
+    failed = 0
+    for model_id, exc in results:
+        if exc is None:
+            print(f"  \u2713 cached {model_id}")
+        else:
+            failed += 1
+            print(f"  \u2717 {model_id}: {exc}")
+    if failed:
+        print(
+            f"\n  {failed} model(s) not cached; they will be skipped at runtime. "
+            "Set HF_TOKEN if a repo is gated — ai4bharat/IndicNER is."
+        )
+    return failed
+
+
+
 def main():
+    if "--prefetch" in sys.argv:
+        # Build-time entry point: dependencies are already installed, so go
+        # straight to populating the model cache.
+        failed = prefetch_models()
+        raise SystemExit(1 if failed and "--strict" in sys.argv else 0)
+
     print("\n" + "═" * 72)
     print("  PII / NER Pipeline — Dependency Setup")
     print("═" * 72)

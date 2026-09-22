@@ -52,13 +52,16 @@ COPY app/ ./app/
 # The token is only mounted for this RUN step and is never written to image
 # layers or history. Without it, this step still succeeds for the other two
 # models — IndicNER alone is skipped here and again (gracefully) at runtime.
+# The model list and, crucially, each model's use_fast flag live in
+# main._HYBRID_NER_SPECS, and --prefetch reads them from there, so the build
+# caches exactly the tokenizer variant the pipeline loads at runtime. Caching a
+# tokenizer as slow when the pipeline asks for it fast leaves a hole in the cache
+# that only shows up as a network call inside an offline TEE.
+# The three models download concurrently; add --strict to fail the build when any
+# of them is missing (default: warn, so a tokenless build still produces an image
+# that runs with the two ungated models).
 RUN --mount=type=secret,id=hf_token,env=HF_TOKEN \
-    python -c "import os; \
-tok = os.environ.get('HF_TOKEN') or None; \
-from transformers import AutoTokenizer, AutoModelForTokenClassification; \
-models=['cfilt/HiNER-original-muril-base-cased','ai4bharat/IndicNER','Babelscape/wikineural-multilingual-ner']; \
-[AutoTokenizer.from_pretrained(m, use_fast=False, token=tok) for m in models]; \
-[AutoModelForTokenClassification.from_pretrained(m, token=tok) for m in models]" || true
+    python app/model_setup.py --prefetch
 
 # Environment Variables
 ENV HF_TOKEN=""

@@ -152,6 +152,44 @@ docker compose up --build
 
 ---
 
+## 🗃️ Dataset Batch Job (`app/batch_pipeline.py`)
+
+The batch job anonymizes configured columns of a CSV/XLSX/JSON dataset. It reads its
+settings from the `free_text_anonymization` object in the dataset config:
+
+| Config key | Default | Description |
+| :--- | :---: | :--- |
+| `enabled` | — | Must be `true` for the job to write a staged file. |
+| `columns` | — | List of column names to anonymize. All must exist in the input. |
+| `minimum_confidence` | `0.0` | Detections below this confidence are ignored. |
+| `ner_batch_size` | `256` | Lines handed to each inference call. Affects progress reporting granularity, not throughput. |
+| `staged_input_path` | — | Where the anonymized CSV is written (must end in `.csv`). |
+| `audit_output_path` | — | Optional JSON audit of every applied detection. |
+| `on_failure` | `"fail"` | `"fail"` aborts the run on a cell error; `"continue"` records it. |
+
+### How it scales
+
+NER runs **once over the whole job**, not once per cell. The job collects every
+distinct line across the configured columns, infers each one exactly once in real
+mini-batches, then projects the spans back onto every cell containing that line.
+On a real PHED export roughly four in five complaint bodies are duplicates, so the
+deduplication alone removes most of the work; the batching removes most of the rest.
+
+Models are loaded one at a time and released after their pass, so peak memory is
+roughly one model (~1 GB) rather than three.
+
+### Environment variables
+
+| Variable | Default | Description |
+| :--- | :---: | :--- |
+| `HF_TOKEN` | `""` | Required for the gated `ai4bharat/IndicNER` repo. Without it that model is skipped (the run still completes with the other two, so check the logs if you expect all three). |
+| `NER_CORPUS_BATCH_SIZE` | `256` | Lines per inference call — progress granularity only, overridden by `ner_batch_size` in config. |
+| `NER_TENSOR_BATCH_SIZE` | `0` (auto) | Tensor batch size. Sequences pad to the batch's longest, so bigger is not better and the optimum tracks the core count — auto picks `max(8, 4 x threads)`. Measured on the PHED corpus at 2 threads: 43 ms/line at 8, 52 at 16, 63 unbatched, 64 at 32. Pin an explicit value to override, or `1` to disable batching. |
+| `NER_TORCH_THREADS` | `0` (leave as-is, i.e. 4) | Torch CPU threads for the batch job. Tune per machine — on a hybrid-core laptop CPU, raising it measured *slower*, so benchmark before changing it. |
+| `NER_QUANTIZE` | unset | Dynamic INT8 quantization. **Not recommended for production anonymization.** Measured on the PHED corpus it is ~1.5x faster (90 → 59 ms/line) but changes what is detected: 386 entities found against fp32's 481, only 290 in common. Missing a fifth of the names and locations is a privacy failure, not a tuning trade-off. |
+
+---
+
 ## 📊 Performance & Timing Benchmarks
 
 | Execution Stage | Original Baseline | Optimized Parallel Pipeline | Net Speedup |
@@ -160,6 +198,31 @@ docker compose up --build
 | **Model Weight Loading** | 10.15s | 3.74s | **2.7x Faster Loading** |
 | **NER Model Execution** | 23.53s | 14.70s | **1.6x Faster Inference** |
 | **Total Completion Time (Cached)** | 34.62s | **15.81s** | **2.19x Faster Total Pipeline** |
+
+### Dataset batch job
+
+Measured on a PHED grievance export (`complaint_details`, `complainant_address`,
+`complainant_name`), 2 of 3 models loaded, CPU only, identical detection counts
+before and after (11,399):
+
+| Rows | Cells | Distinct lines | Per-cell NER (old) | Corpus NER (new) |
+| ---: | ---: | ---: | ---: | ---: |
+| 6,000 | 17,913 | 7,833 (2.3x) | 2032 s | **1035 s** |
+
+The gain comes from deduplication, so it grows with the dataset: at 6,000 rows
+duplicates collapse the work 2.3x, but across the full 181,430-row export
+544,193 cells reduce to 172,804 distinct lines — 3.15x. Extrapolating the
+measured 132 ms per distinct line, the full export runs in roughly 6 hours
+against about 17 for the per-cell path, on the same hardware.
+
+Inference itself is the floor: three (or two) transformer passes over ~173k
+distinct lines on CPU. Measured at 2 threads, one model costs ~43 ms per distinct
+line, so all three over the full export land near 10 hours on a 2-vCPU host.
+
+Past that the lever is capacity, not tuning. Line-level inference is embarrassingly
+parallel and the three models are independent, so vCPUs convert almost directly
+into wall time; batching and thread tweaks are worth well under 2x by comparison.
+The GPU path in `main.py` is commented out and would need reinstating to use one.
 
 ---
 
