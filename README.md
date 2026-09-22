@@ -178,6 +178,48 @@ deduplication alone removes most of the work; the batching removes most of the r
 Models are loaded one at a time and released after their pass, so peak memory is
 roughly one model (~1 GB) rather than three.
 
+### Debug instrumentation
+
+Set `debug.enabled` in the `free_text_anonymization` block (or `ANON_DEBUG=1`) to
+write two extra reports. Both are off by default and cost nothing when off — the
+normal run is byte-identical with them disabled.
+
+| Debug key | Default | Description |
+| :--- | :---: | :--- |
+| `enabled` | `false` | Turns on step profiling and per-row attribution. |
+| `include_values` | `false` | Writes the detected PII text into the attribution report. **Off by default on purpose:** it puts the unredacted values the run just masked into a plaintext file beside the anonymized output. |
+| `max_rows` | `0` (all) | Cap the rows listed in the attribution report. |
+| `profile_output_path` | `output/debug_profile.json` | Per-step timing and peak RSS. |
+| `attribution_output_path` | `output/debug_detections.json` | Per-row detections, machine-readable. |
+| `attribution_text_path` | `output/debug_detections.txt` | Per-row detections, human-readable. |
+
+**Profile report** — each model's load, inference and release measured separately,
+with peak RSS sampled during the step rather than read at its edges (a model
+allocates and frees inside a step, so boundary readings miss the spike that
+decides whether the job fits in memory):
+
+```
+  [profile] load:    HiNER (IIT Bombay / MuRIL)     2.74s  peak  905.6 MB  delta  +87.6 MB
+  [profile] infer:   HiNER (IIT Bombay / MuRIL)     5.60s  peak 1317.9 MB  delta +398.0 MB
+  [profile] release: HiNER (IIT Bombay / MuRIL)     0.27s  peak 1291.9 MB  delta -389.6 MB
+```
+
+The JSON adds `ms_per_line` per model, so the three are directly comparable.
+
+**Attribution report** — what was detected in each row, and which detector found
+it. A detection claimed by two models is listed under both:
+
+```
+Row 2
+    [complaint_details] Aadhaar  <- Regex  (conf 1.00, partial_mask)
+    [complainant_address] LOCATION  <- XLM-RoBERTa  (conf 0.84, suppress)
+    [complainant_name] PERSON  <- XLM-RoBERTa, HiNER  (conf 0.93, suppress)
+```
+
+Attribution is recovered by overlap: the merge step pools every model's spans, so
+a merged entity no longer records its origin, and a model whose raw span covers
+the same characters is taken to have found it.
+
 ### Environment variables
 
 | Variable | Default | Description |

@@ -23,9 +23,12 @@ try:
         full_pii_scan,
         merge_pii_hits,
         run_corpus_line_ner,
+        _tensor_batch_size,
         _TRANSFORMERS_AVAILABLE,
     )
+    from profiling import NULL_PROFILER, Profiler
 except ModuleNotFoundError:  # Supports `python -m app.batch_pipeline` too.
+    from .profiling import NULL_PROFILER, Profiler
     from .main import (
         NER_CORPUS_BATCH_SIZE,
         PiiHit,
@@ -33,6 +36,7 @@ except ModuleNotFoundError:  # Supports `python -m app.batch_pipeline` too.
         full_pii_scan,
         merge_pii_hits,
         run_corpus_line_ner,
+        _tensor_batch_size,
         _TRANSFORMERS_AVAILABLE,
     )
 
@@ -261,7 +265,35 @@ def _ner_lines(text: str) -> list[tuple[int, str]]:
     return result
 
 
-def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[str, Any]]]:
+def _models_for_span(
+    start: int,
+    end: int,
+    line_spans: list[tuple[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Which models produced a raw span overlapping [start, end) on this line.
+
+    merge_line_spans pools every model's spans before merging, so a merged entity
+    carries no record of where it came from. Overlap is the reverse mapping: a
+    model that fired on the same characters is a model that found this entity.
+    """
+    found: dict[str, float] = {}
+    for label, span in line_spans:
+        if span["start"] < end and start < span["end"]:
+            score = float(span.get("score", 0.0))
+            if score > found.get(label, -1.0):
+                found[label] = score
+    return [
+        {"model": label, "confidence": round(score, 4)}
+        for label, score in sorted(found.items(), key=lambda kv: -kv[1])
+    ]
+
+
+def _build_ner_index(
+    texts: list[str],
+    batch_size: int,
+    profiler=None,
+    attribute: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
     """Run hybrid NER once over every distinct line in the job.
 
     This used to run per cell: each call re-orchestrated the model worker threads
@@ -271,39 +303,67 @@ def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[s
     mini-batches, and the resulting spans are projected back onto each text that
     contains that line.
 
+    With `attribute` set, each hit also carries a "models" list naming the models
+    that fired on it — the merged entities alone cannot say.
+
     Returns {text: [hit dicts with cell-relative offsets]}.
     """
-    line_ids: dict[str, int] = {}
-    corpus: list[str] = []
-    for text in texts:
-        for _, stripped in _ner_lines(text):
-            if stripped not in line_ids:
-                line_ids[stripped] = len(corpus)
-                corpus.append(stripped)
+    profiler = profiler or NULL_PROFILER
+    with profiler.step("build line corpus", parent="ner"):
+        line_ids: dict[str, int] = {}
+        corpus: list[str] = []
+        for text in texts:
+            for _, stripped in _ner_lines(text):
+                if stripped not in line_ids:
+                    line_ids[stripped] = len(corpus)
+                    corpus.append(stripped)
 
     print(
         f"[Batch] Hybrid NER over {len(corpus)} distinct lines "
         f"from {len(texts)} distinct values …",
         flush=True,
     )
-    entities = run_corpus_line_ner(corpus, batch_size=batch_size, release_models=True)
+    spans_by_model: dict[str, list[list[dict[str, Any]]]] | None = {} if attribute else None
+    entities = run_corpus_line_ner(
+        corpus,
+        batch_size=batch_size,
+        release_models=True,
+        spans_by_model=spans_by_model,
+        profiler=profiler,
+    )
 
-    index: dict[str, list[dict[str, Any]]] = {}
-    for text in texts:
-        bases = _line_bases(text)
-        hits: list[dict[str, Any]] = []
-        for line_idx, stripped in _ner_lines(text):
-            base = bases[line_idx]
-            for entity in entities[line_ids[stripped]]:
-                hits.append({
-                    "start": base + entity.start_char - 1,
-                    "end": base + entity.end_char,
-                    "label": entity.category,
-                    "source": "Hybrid NER",
-                    "confidence": entity.score,
-                    "value": entity.text,
-                })
-        index[text] = hits
+    # Flatten to per-line (label, span) pairs once, rather than per entity.
+    per_line_spans: list[list[tuple[str, dict[str, Any]]]] = []
+    if spans_by_model:
+        per_line_spans = [[] for _ in corpus]
+        for label, line_lists in spans_by_model.items():
+            for line_id, spans in enumerate(line_lists):
+                for span in spans:
+                    per_line_spans[line_id].append((label, span))
+
+    with profiler.step("project spans onto cells", parent="ner"):
+        index: dict[str, list[dict[str, Any]]] = {}
+        for text in texts:
+            bases = _line_bases(text)
+            hits: list[dict[str, Any]] = []
+            for line_idx, stripped in _ner_lines(text):
+                base = bases[line_idx]
+                line_id = line_ids[stripped]
+                for entity in entities[line_id]:
+                    hit = {
+                        "start": base + entity.start_char - 1,
+                        "end": base + entity.end_char,
+                        "label": entity.category,
+                        "source": "Hybrid NER",
+                        "confidence": entity.score,
+                        "value": entity.text,
+                    }
+                    if per_line_spans:
+                        hit["models"] = _models_for_span(
+                            entity.start_char - 1, entity.end_char, per_line_spans[line_id]
+                        )
+                    hits.append(hit)
+            index[text] = hits
     return index
 
 
@@ -313,6 +373,7 @@ def _sanitize(
     column: str,
     salts: dict[str, str],
     ner_hits: list[dict[str, Any]],
+    include_values: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(text, str) or not text:
         return text, []
@@ -344,7 +405,7 @@ def _sanitize(
         replacement, technique = _hardcoded_policy(span_hits[0]["label"], text[start:end], column, salts)
         output = output[:start] + replacement + output[end:]
         for hit in span_hits:
-            audit.append({
+            entry = {
                 "label": hit["label"],
                 "source": hit["source"],
                 "language": language,
@@ -352,8 +413,152 @@ def _sanitize(
                 "confidence": hit["confidence"],
                 "start_offset": start,
                 "end_offset": end,
-            })
+            }
+            if "models" in hit:
+                entry["models"] = hit["models"]
+            if include_values:
+                # Debug only: this is the unredacted PII, see _debug_settings.
+                entry["detected_text"] = text[start:end]
+            audit.append(entry)
     return output, list(reversed(audit))
+
+
+def _torch_threads() -> int:
+    try:
+        import torch
+        return torch.get_num_threads()
+    except Exception:
+        return 0
+
+
+def _model_load_summary(profiler) -> dict[str, dict[str, Any]]:
+    """Regroup the flat step list into per-model load / infer / release costs.
+
+    This is the breakdown worth looking at first: it separates the fixed price of
+    getting a model into memory from the per-line price of running it, and gives
+    each model's own peak RSS rather than one number for the whole job.
+    """
+    summary: dict[str, dict[str, Any]] = {}
+    for step in profiler.steps:
+        for phase in ("load", "infer", "release"):
+            prefix = f"{phase}: "
+            if not step.name.startswith(prefix):
+                continue
+            entry = summary.setdefault(step.name[len(prefix):], {})
+            entry[f"{phase}_seconds"] = round(step.seconds, 3)
+            entry[f"{phase}_peak_rss_mb"] = round(step.rss_peak / 1e6, 1)
+            entry[f"{phase}_rss_delta_mb"] = round((step.rss_end - step.rss_start) / 1e6, 1)
+            if phase == "infer" and step.detail.get("lines"):
+                lines = step.detail["lines"]
+                entry["lines"] = lines
+                entry["ms_per_line"] = round(step.seconds / lines * 1000, 2)
+    return summary
+
+
+def _debug_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Read the optional `debug` block, with ANON_DEBUG=1 as an override.
+
+    include_values is off by default and deliberately so: it writes the
+    unredacted PII the run just masked into a plaintext report beside the
+    anonymized output, which defeats the point of the job unless someone has
+    decided that is acceptable for this dataset.
+    """
+    debug = settings.get("debug")
+    if not isinstance(debug, dict):
+        debug = {}
+    enabled = bool(debug.get("enabled", False)) or os.getenv("ANON_DEBUG", "").strip() in {"1", "true", "yes"}
+    return {
+        "enabled": enabled,
+        "include_values": bool(debug.get("include_values", False)),
+        "profile_output_path": debug.get("profile_output_path", "output/debug_profile.json"),
+        "attribution_output_path": debug.get("attribution_output_path", "output/debug_detections.json"),
+        "attribution_text_path": debug.get("attribution_text_path", "output/debug_detections.txt"),
+        "max_rows": int(debug.get("max_rows", 0)),
+    }
+
+
+def _model_short_name(label: str) -> str:
+    """'HiNER (IIT Bombay / MuRIL)' -> 'HiNER', for readable per-row lines."""
+    return label.split(" (")[0].strip()
+
+
+def _write_attribution(
+    audit: list[dict[str, Any]],
+    json_path: Path,
+    text_path: Path,
+    include_values: bool,
+    max_rows: int,
+) -> None:
+    """Emit what was detected, per row, and which detector found it.
+
+    The JSON form is grouped by row for programmatic diffing between runs; the
+    text form is the one to read when asking "why did this row come out like
+    that". Regex hits carry their own source name and no model list.
+    """
+    by_row: dict[int, list[dict[str, Any]]] = {}
+    for item in audit:
+        by_row.setdefault(item["row"], []).append(item)
+
+    rows = sorted(by_row)
+    if max_rows > 0:
+        rows = rows[:max_rows]
+
+    payload = {
+        "rows_reported": len(rows),
+        "rows_with_detections": len(by_row),
+        "detections": len(audit),
+        "values_included": include_values,
+        "rows": [
+            {
+                "row": row,
+                "detections": [
+                    {
+                        "column": it["column"],
+                        "label": it["label"],
+                        "detected_by": (
+                            [m["model"] for m in it["models"]] if it.get("models")
+                            else [it["source"]]
+                        ),
+                        "confidence": round(float(it["confidence"]), 4),
+                        "technique": it["technique"],
+                        "offsets": [it["start_offset"], it["end_offset"]],
+                        **({"text": it["detected_text"]} if "detected_text" in it else {}),
+                    }
+                    for it in by_row[row]
+                ],
+            }
+            for row in rows
+        ],
+    }
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    with json_path.open("w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+
+    lines = [
+        f"Detections per row - {len(audit)} across {len(by_row)} rows"
+        + (f" (showing first {len(rows)})" if max_rows > 0 and len(rows) < len(by_row) else ""),
+        "PII values are NOT included; set debug.include_values to add them."
+        if not include_values
+        else "WARNING: this file contains unredacted PII (debug.include_values is on).",
+        "",
+    ]
+    for row in rows:
+        lines.append(f"Row {row}")
+        for it in by_row[row]:
+            who = (
+                ", ".join(_model_short_name(m["model"]) for m in it["models"])
+                if it.get("models") else it["source"]
+            )
+            shown = f" {it['detected_text']!r}" if "detected_text" in it else ""
+            lines.append(
+                f"    [{it['column']}] {it['label']}{shown}"
+                f"  <- {who}  (conf {float(it['confidence']):.2f}, {it['technique']})"
+            )
+        lines.append("")
+    text_path.parent.mkdir(parents=True, exist_ok=True)
+    text_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[Batch] Wrote detection attribution: {json_path}")
+    print(f"[Batch] Wrote detection attribution: {text_path}")
 
 
 def run(config_path: str, root: str | None = None) -> dict[str, Any]:
@@ -368,7 +573,20 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     if not isinstance(settings, dict):
         raise BatchError("free_text_anonymization must be an object")
 
-    df, _source_format = _read_table(source)
+    debug = _debug_settings(settings)
+    profiler = Profiler(enabled=debug["enabled"])
+    profiler.start()
+    if debug["enabled"]:
+        print("[Batch] Debug instrumentation on.", flush=True)
+        if debug["include_values"]:
+            print(
+                "[Batch] WARNING: debug.include_values writes unredacted PII to the "
+                "attribution report.",
+                flush=True,
+            )
+
+    with profiler.step("read input table", rows_source=str(source)):
+        df, _source_format = _read_table(source)
     if settings.get("enabled") is not True:
         print("[Batch] free_text_anonymization.enabled is false; no staged file written.")
         return {"status": "disabled", "rows": len(df), "columns": len(df.columns)}
@@ -402,19 +620,31 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     # PHED export are duplicates), and the sanitized form of a value depends only
     # on (value, column), so each distinct pair is computed once however many rows
     # carry it.
-    distinct: set[str] = set()
-    for column in columns:
-        for value in df.iloc[:, column_locs[column]].tolist():
-            if isinstance(value, str) and value:
-                distinct.add(value)
-    texts = sorted(distinct)
+    with profiler.step("collect distinct values") as collect:
+        distinct: set[str] = set()
+        cells = 0
+        for column in columns:
+            for value in df.iloc[:, column_locs[column]].tolist():
+                if isinstance(value, str) and value:
+                    cells += 1
+                    distinct.add(value)
+        texts = sorted(distinct)
+        collect.detail.update(cells=cells, distinct=len(texts))
     print(
         f"[Batch] {len(df)} rows x {len(columns)} column(s); {len(texts)} distinct values.",
         flush=True,
     )
 
     # Pass 2 — one NER sweep over the whole corpus, then apply the policy.
-    ner_index = _build_ner_index(texts, batch_size) if texts else {}
+    with profiler.step("ner") as ner_step:
+        ner_index = (
+            _build_ner_index(texts, batch_size, profiler=profiler, attribute=debug["enabled"])
+            if texts else {}
+        )
+        ner_step.detail.update(distinct_values=len(texts))
+
+    apply_cm = profiler.step("apply policy")
+    apply_step = apply_cm.__enter__()
     sanitized_cache: dict[tuple[str, str], tuple[str, list[dict[str, Any]]]] = {}
     for column in columns:
         loc = column_locs[column]
@@ -431,6 +661,7 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
                         column,
                         column_hash_salts,
                         ner_index.get(value, []),
+                        include_values=debug["enabled"] and debug["include_values"],
                     )
                 sanitized, accepted = sanitized_cache[key]
                 if accepted:
@@ -442,6 +673,8 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
                 if on_failure == "fail":
                     raise BatchError(f"Anonymization failed at row {row_index + 1}, column {column!r}: {exc}") from exc
         df.isetitem(loc, values)
+    apply_step.detail.update(detections=len(audit), failures=len(failures))
+    apply_cm.__exit__(None, None, None)
     # Pass 2 walks column-major for cheap bulk column reads; the audit is still
     # emitted row-major, in configured column order, as consumers expect.
     column_order = {column: rank for rank, column in enumerate(columns)}
@@ -457,16 +690,44 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
             "free_text_anonymization.staged_input_path must end with '.csv' "
             "because SKALD consumes the staged CSV"
         )
-    _write_table(df, staged)
+    with profiler.step("write staged csv"):
+        _write_table(df, staged)
 
     audit_path_value = settings.get("audit_output_path")
     if audit_path_value:
-        audit_path = _path(audit_path_value, work_root)
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        with audit_path.open("w", encoding="utf-8") as fh:
-            json.dump({"rows": len(df), "columns": list(df.columns), "detections": audit, "failures": failures}, fh, indent=2)
+        with profiler.step("write audit json"):
+            audit_path = _path(audit_path_value, work_root)
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with audit_path.open("w", encoding="utf-8") as fh:
+                json.dump({"rows": len(df), "columns": list(df.columns), "detections": audit, "failures": failures}, fh, indent=2)
     print(f"[Batch] Wrote staged dataset: {staged}")
     print(f"[Batch] Rows: {len(df)}; detections: {len(audit)}; failures: {len(failures)}")
+
+    if debug["enabled"]:
+        with profiler.step("write debug reports"):
+            _write_attribution(
+                audit,
+                _path(debug["attribution_output_path"], work_root),
+                _path(debug["attribution_text_path"], work_root),
+                include_values=debug["include_values"],
+                max_rows=debug["max_rows"],
+            )
+        profiler.stop()
+        profiler.write(
+            _path(debug["profile_output_path"], work_root),
+            extra={
+                "rows": len(df),
+                "columns": columns,
+                "distinct_values": len(texts),
+                "detections": len(audit),
+                "torch_threads": _torch_threads(),
+                "tensor_batch_size": _tensor_batch_size(),
+                "models": _model_load_summary(profiler),
+            },
+        )
+        print(profiler.table(), flush=True)
+    profiler.stop()
+
     return {"status": "completed", "rows": len(df), "detections": len(audit), "failures": len(failures), "staged_input_path": str(staged)}
 
 

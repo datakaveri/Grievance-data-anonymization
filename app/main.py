@@ -1780,6 +1780,8 @@ def run_corpus_line_ner(
     lines: List[str],
     batch_size: int = NER_CORPUS_BATCH_SIZE,
     release_models: bool = False,
+    spans_by_model: Optional[Dict[str, List[List[Dict]]]] = None,
+    profiler=None,
 ) -> List[List[NerEntity]]:
     """Hybrid NER over a whole corpus of lines, returning one entity list per line.
 
@@ -1795,6 +1797,10 @@ def run_corpus_line_ner(
 
     release_models evicts each pipe from the cache once its pass is done — worth
     it for a one-shot batch job, where nothing reuses the weights afterwards.
+
+    Pass a dict as `spans_by_model` to have it filled with {model label: per-line
+    raw spans}; the merged return value pools the models together and cannot say
+    which one found what, which is what attribution reporting needs.
     """
     if not lines:
         return []
@@ -1812,7 +1818,10 @@ def run_corpus_line_ner(
     if NER_TORCH_THREADS > 0:
         _torch.set_num_threads(NER_TORCH_THREADS)
     try:
-        return _corpus_ner_passes(lines, order, spans_per_line, batch_size, release_models)
+        return _corpus_ner_passes(
+            lines, order, spans_per_line, batch_size, release_models,
+            spans_by_model=spans_by_model, profiler=profiler,
+        )
     finally:
         _torch.set_num_threads(previous_threads)
 
@@ -1823,8 +1832,18 @@ def _corpus_ner_passes(
     spans_per_line: List[List[Dict]],
     batch_size: int,
     release_models: bool,
+    spans_by_model: Optional[Dict[str, List[List[Dict]]]] = None,
+    profiler=None,
 ) -> List[List[NerEntity]]:
-    """One full-corpus pass per model, then merge each line's spans (see caller)."""
+    """One full-corpus pass per model, then merge each line's spans (see caller).
+
+    When `spans_by_model` is supplied it is filled in alongside the merged view, so
+    a caller can still say which model produced a given span after the merge has
+    pooled them.
+    """
+    from profiling import NULL_PROFILER
+
+    profiler = profiler or NULL_PROFILER
     tensor_batch = _tensor_batch_size()
     print(
         f"  [NER] {len(lines)} lines, tensor batch {tensor_batch}, "
@@ -1832,11 +1851,19 @@ def _corpus_ner_passes(
         flush=True,
     )
     for label, model_id, use_fast, min_score in _HYBRID_NER_SPECS:
-        pipe = _load_ner_pipeline(model_id, use_fast=use_fast)
+        with profiler.step(f"load: {label}", parent="ner", model=model_id):
+            pipe = _load_ner_pipeline(model_id, use_fast=use_fast)
         if pipe is None:
             print(f"  [NER] {label}: unavailable, skipped.", flush=True)
             continue
 
+        model_spans = None if spans_by_model is None else spans_by_model.setdefault(
+            label, [[] for _ in lines]
+        )
+        infer_cm = profiler.step(
+            f"infer: {label}", parent="ner", model=model_id, lines=len(lines)
+        )
+        infer_cm.__enter__()
         started = time.time()
         done = 0
         for offset in range(0, len(order), batch_size):
@@ -1851,6 +1878,8 @@ def _corpus_ner_passes(
                         flush=True,
                     )
                 spans_per_line[result.line_no].extend(result.spans)
+                if model_spans is not None:
+                    model_spans[result.line_no].extend(result.spans)
             done += len(chunk)
             if offset and (offset // batch_size) % 25 == 0:
                 rate = done / max(time.time() - started, 1e-6)
@@ -1861,16 +1890,19 @@ def _corpus_ner_passes(
                     flush=True,
                 )
 
-        print(
-            f"  [NER] {label}: {len(order)} lines in {time.time() - started:.1f}s",
-            flush=True,
-        )
-        if release_models:
-            _NER_PIPELINE_CACHE.pop(model_id, None)
-            del pipe
-            gc.collect()
+        elapsed = time.time() - started
+        infer_cm.__exit__(None, None, None)
+        print(f"  [NER] {label}: {len(order)} lines in {elapsed:.1f}s", flush=True)
 
-    return [merge_line_spans(spans_per_line[i], lines[i]) for i in range(len(lines))]
+        if release_models:
+            with profiler.step(f"release: {label}", parent="ner", model=model_id):
+                _NER_PIPELINE_CACHE.pop(model_id, None)
+                del pipe
+                gc.collect()
+
+    with profiler.step("merge spans", parent="ner"):
+        merged = [merge_line_spans(spans_per_line[i], lines[i]) for i in range(len(lines))]
+    return merged
 
 
 def run_line_by_line_ner(
