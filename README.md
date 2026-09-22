@@ -181,13 +181,17 @@ roughly one model (~1 GB) rather than three.
 ### Debug instrumentation
 
 Set `debug.enabled` in the `free_text_anonymization` block (or `ANON_DEBUG=1`) to
-write two extra reports. Both are off by default and cost nothing when off — the
-normal run is byte-identical with them disabled.
+write two extra reports. Profiling is off by default and costs nothing when off —
+the normal run is byte-identical with it disabled.
+
+This is the `debug-instrumentation` branch: once debugging is on it includes the
+detected PII text in the report, because that is what makes a detection readable.
+It is meant for local inspection, not for the TEE.
 
 | Debug key | Default | Description |
 | :--- | :---: | :--- |
 | `enabled` | `false` | Turns on step profiling and per-row attribution. |
-| `include_values` | `false` | Writes the detected PII text into the attribution report. **Off by default on purpose:** it puts the unredacted values the run just masked into a plaintext file beside the anonymized output. |
+| `include_values` | `true` | Writes the detected PII text into the attribution report. On by default **on this debug branch only** — inspecting a detection you cannot read is guesswork. It writes unredacted PII to disk, so set it to `false` (or do not run this branch) anywhere that matters, such as in the TEE. |
 | `max_rows` | `0` (all) | Cap the rows listed in the attribution report. |
 | `profile_output_path` | `output/debug_profile.json` | Per-step timing and peak RSS. |
 | `attribution_output_path` | `output/debug_detections.json` | Per-row detections, machine-readable. |
@@ -211,9 +215,9 @@ it. A detection claimed by two models is listed under both:
 
 ```
 Row 2
-    [complaint_details] Aadhaar  <- Regex  (conf 1.00, partial_mask)
-    [complainant_address] LOCATION  <- XLM-RoBERTa  (conf 0.84, suppress)
-    [complainant_name] PERSON  <- XLM-RoBERTa, HiNER  (conf 0.93, suppress)
+    [complaint_details] Aadhaar '3737 7373 3737'  <- Regex  (conf 1.00, partial_mask)
+    [complainant_address] LOCATION 'MOHRA'  <- XLM-RoBERTa  (conf 0.84, suppress)
+    [complainant_name] PERSON 'HARMESH KUMAR'  <- XLM-RoBERTa, HiNER  (conf 0.93, suppress)
 ```
 
 Attribution is recovered by overlap: the merge step pools every model's spans, so

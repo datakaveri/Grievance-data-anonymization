@@ -458,10 +458,11 @@ def _model_load_summary(profiler) -> dict[str, dict[str, Any]]:
 def _debug_settings(settings: dict[str, Any]) -> dict[str, Any]:
     """Read the optional `debug` block, with ANON_DEBUG=1 as an override.
 
-    include_values is off by default and deliberately so: it writes the
-    unredacted PII the run just masked into a plaintext report beside the
-    anonymized output, which defeats the point of the job unless someone has
-    decided that is acceptable for this dataset.
+    include_values defaults ON here: this branch exists to inspect what the
+    models did, and a detection you cannot see the text of is hard to judge. It
+    puts unredacted PII in the report, which is why that is a defensible default
+    on a debug branch and not on one that runs in the TEE — set it to false to
+    get labels and offsets only.
     """
     debug = settings.get("debug")
     if not isinstance(debug, dict):
@@ -469,7 +470,7 @@ def _debug_settings(settings: dict[str, Any]) -> dict[str, Any]:
     enabled = bool(debug.get("enabled", False)) or os.getenv("ANON_DEBUG", "").strip() in {"1", "true", "yes"}
     return {
         "enabled": enabled,
-        "include_values": bool(debug.get("include_values", False)),
+        "include_values": bool(debug.get("include_values", True)),
         "profile_output_path": debug.get("profile_output_path", "output/debug_profile.json"),
         "attribution_output_path": debug.get("attribution_output_path", "output/debug_detections.json"),
         "attribution_text_path": debug.get("attribution_text_path", "output/debug_detections.txt"),
@@ -537,9 +538,9 @@ def _write_attribution(
     lines = [
         f"Detections per row - {len(audit)} across {len(by_row)} rows"
         + (f" (showing first {len(rows)})" if max_rows > 0 and len(rows) < len(by_row) else ""),
-        "PII values are NOT included; set debug.include_values to add them."
-        if not include_values
-        else "WARNING: this file contains unredacted PII (debug.include_values is on).",
+        "Detected PII text included (debug.include_values is on)."
+        if include_values
+        else "PII values omitted; set debug.include_values to add them.",
         "",
     ]
     for row in rows:
@@ -580,8 +581,8 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
         print("[Batch] Debug instrumentation on.", flush=True)
         if debug["include_values"]:
             print(
-                "[Batch] WARNING: debug.include_values writes unredacted PII to the "
-                "attribution report.",
+                "[Batch] Attribution report includes detected PII text "
+                "(debug.include_values).",
                 flush=True,
             )
 
