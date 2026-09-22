@@ -617,8 +617,8 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     started = time.time()
 
     # Pass 1 — collect the distinct values we actually have to anonymize.
-    # Grievance free text repeats heavily (four in five complaint bodies in a real
-    # PHED export are duplicates), and the sanitized form of a value depends only
+    # Grievance free text repeats heavily (four in five complaint bodies in one real
+    # grievance export are duplicates), and the sanitized form of a value depends only
     # on (value, column), so each distinct pair is computed once however many rows
     # carry it.
     with profiler.step("collect distinct values") as collect:

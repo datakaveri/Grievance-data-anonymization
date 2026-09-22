@@ -172,7 +172,7 @@ settings from the `free_text_anonymization` object in the dataset config:
 NER runs **once over the whole job**, not once per cell. The job collects every
 distinct line across the configured columns, infers each one exactly once in real
 mini-batches, then projects the spans back onto every cell containing that line.
-On a real PHED export roughly four in five complaint bodies are duplicates, so the
+On a real grievance export roughly four in five complaint bodies are duplicates, so the
 deduplication alone removes most of the work; the batching removes most of the rest.
 
 Models are loaded one at a time and released after their pass, so peak memory is
@@ -230,9 +230,9 @@ the same characters is taken to have found it.
 | :--- | :---: | :--- |
 | `HF_TOKEN` | `""` | Required for the gated `ai4bharat/IndicNER` repo. Without it that model is skipped (the run still completes with the other two, so check the logs if you expect all three). |
 | `NER_CORPUS_BATCH_SIZE` | `256` | Lines per inference call — progress granularity only, overridden by `ner_batch_size` in config. |
-| `NER_TENSOR_BATCH_SIZE` | `0` (auto) | Tensor batch size. Sequences pad to the batch's longest, so bigger is not better and the optimum tracks the core count — auto picks `max(8, 4 x threads)`. Measured on the PHED corpus at 2 threads: 43 ms/line at 8, 52 at 16, 63 unbatched, 64 at 32. Pin an explicit value to override, or `1` to disable batching. |
+| `NER_TENSOR_BATCH_SIZE` | `0` (auto) | Tensor batch size. Sequences pad to the batch's longest, so bigger is not better and the optimum tracks the core count — auto picks `max(8, 4 x threads)`. Measured on a reference grievance corpus at 2 threads: 43 ms/line at 8, 52 at 16, 63 unbatched, 64 at 32. Pin an explicit value to override, or `1` to disable batching. |
 | `NER_TORCH_THREADS` | `0` (leave as-is, i.e. 4) | Torch CPU threads for the batch job. Tune per machine — on a hybrid-core laptop CPU, raising it measured *slower*, so benchmark before changing it. |
-| `NER_QUANTIZE` | unset | Dynamic INT8 quantization. **Not recommended for production anonymization.** Measured on the PHED corpus it is ~1.5x faster (90 → 59 ms/line) but changes what is detected: 386 entities found against fp32's 481, only 290 in common. Missing a fifth of the names and locations is a privacy failure, not a tuning trade-off. |
+| `NER_QUANTIZE` | unset | Dynamic INT8 quantization. **Not recommended for production anonymization.** Measured on a reference grievance corpus it is ~1.5x faster (90 → 59 ms/line) but changes what is detected: 386 entities found against fp32's 481, only 290 in common. Missing a fifth of the names and locations is a privacy failure, not a tuning trade-off. |
 
 ---
 
@@ -247,7 +247,7 @@ the same characters is taken to have found it.
 
 ### Dataset batch job
 
-Measured on a PHED grievance export (`complaint_details`, `complainant_address`,
+Measured on a reference grievance export (`complaint_details`, `complainant_address`,
 `complainant_name`), 2 of 3 models loaded, CPU only, identical detection counts
 before and after (11,399):
 

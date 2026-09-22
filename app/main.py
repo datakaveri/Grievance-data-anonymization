@@ -1080,7 +1080,7 @@ _NER_INFER_LOCK = None
 
 _NER_PIPELINE_CACHE: Dict[str, object] = {}
 
-# Dynamic INT8 quantization of the Linear layers. Faster, but on the PHED corpus
+# Dynamic INT8 quantization of the Linear layers. Faster, but on a reference corpus
 # it recovered 386 entities where fp32 found 481, with only 290 shared — for a
 # redaction pipeline that is a fifth of the names and locations going unmasked,
 # so it stays off unless a deployment has measured the trade-off on its own data.
@@ -1748,7 +1748,7 @@ NER_CORPUS_BATCH_SIZE = int(os.getenv("NER_CORPUS_BATCH_SIZE", "256"))
 
 # Real tensor batching. Every sequence in a batch pads up to the batch's longest,
 # so the gain does not grow with batch size — past the optimum, padding waste
-# overtakes it. On the PHED export (172k distinct lines, mean 48 chars) the best
+# overtakes it. On a reference export (172k distinct lines, mean 48 chars) the best
 # size tracked the thread count: at 2 threads 8 won every repeat (43 vs 63 ms/line
 # one-at-a-time, with 16 at 52 and 32 at 64), while at 4 threads 16 won. 0 picks a
 # size from that relationship; set an explicit value to pin it, or 1 to batch off.
