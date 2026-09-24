@@ -149,6 +149,145 @@ PII_DISPLAY_NAMES: Dict[str, str] = {
     "Age": "Age",
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NON-PII ALLOWLIST & CONTEXTUAL TAG CORRECTION SYSTEM (Hindi, English, Hinglish)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_NON_PII_LIST: List[Union[str, Dict[str, Any]]] = [
+    {"word": "PLS", "entity": "ORG"},
+    {"word": "PLS", "entity": "ALL"},
+    {"word": "PLEASE", "entity": "ALL"},
+    {"word": "KINDLY", "entity": "ALL"},
+    {"word": "SIR", "entity": "ALL"},
+    {"word": "MADAM", "entity": "ALL"},
+    {"word": "RESPECTED", "entity": "ALL"},
+    {"word": "REGARDS", "entity": "ALL"},
+    {"word": "THANKS", "entity": "ALL"},
+    {"word": "THANKING", "entity": "ALL"},
+    {"word": "SUBJECT", "entity": "ALL"},
+    {"word": "SUB", "entity": "ALL"},
+    {"word": "REF", "entity": "ALL"},
+    {"word": "GRIEVANCE", "entity": "ALL"},
+    {"word": "COMPLAINT", "entity": "ALL"},
+    {"word": "APPLICATION", "entity": "ALL"},
+    {"word": "REQ", "entity": "ALL"},
+    {"word": "REQUEST", "entity": "ALL"},
+    {"word": "S.I.NO", "entity": "ALL"},
+    {"word": "SL.NO", "entity": "ALL"},
+    {"word": "SR.NO", "entity": "ALL"},
+    {"word": "NO", "entity": "ALL"},
+    {"word": "DATE", "entity": "ALL"},
+    # Hindi / Hinglish common non-pii false positives
+    {"word": "कृपया", "entity": "ALL"},
+    {"word": "महोदय", "entity": "ALL"},
+    {"word": "महोदया", "entity": "ALL"},
+    {"word": "विषय", "entity": "ALL"},
+    {"word": "शिकायत", "entity": "ALL"},
+    {"word": "आवेदन", "entity": "ALL"},
+    {"word": "धन्यवाद", "entity": "ALL"},
+    {"word": "Kripya", "entity": "ALL"},
+    {"word": "Mahoday", "entity": "ALL"},
+]
+
+
+def normalize_entity_label(label: Optional[str]) -> Optional[str]:
+    """Normalizes entity category names to standard PERSON, LOCATION, ORGANIZATION or None."""
+    if not label:
+        return None
+    lbl = str(label).upper().strip()
+    if lbl in ("PER", "PERSON", "NAME"):
+        return "PERSON"
+    if lbl in ("LOC", "LOCATION", "GPE"):
+        return "LOCATION"
+    if lbl in ("ORG", "ORGANIZATION"):
+        return "ORGANIZATION"
+    if lbl in ("ALL", "ANY", "*", "NONE"):
+        return None
+    return lbl
+
+
+def parse_non_pii_entry(entry: Any) -> Optional[Dict[str, Optional[str]]]:
+    """Parses string, dict, or tuple non-PII entries into a uniform rule dictionary."""
+    if isinstance(entry, str):
+        w = entry.strip()
+        if not w:
+            return None
+        if ":" in w and not w.startswith("http"):
+            parts = w.split(":", 1)
+            return {"word": parts[0].strip().lower(), "entity": normalize_entity_label(parts[1])}
+        return {"word": w.lower(), "entity": None}
+    elif isinstance(entry, dict):
+        w = str(entry.get("word") or entry.get("text") or entry.get("val") or "").strip()
+        if not w:
+            return None
+        ent = entry.get("entity") or entry.get("label") or entry.get("cat") or entry.get("type")
+        return {"word": w.lower(), "entity": normalize_entity_label(ent)}
+    elif isinstance(entry, (list, tuple)) and len(entry) >= 1:
+        w = str(entry[0]).strip()
+        if not w:
+            return None
+        ent = entry[1] if len(entry) > 1 else None
+        return {"word": w.lower(), "entity": normalize_entity_label(ent)}
+    return None
+
+
+def prepare_non_pii_rules(custom_list: Optional[List[Any]] = None) -> List[Dict[str, Optional[str]]]:
+    """Combines default and user custom non-PII exclusion lists into a deduplicated rule set."""
+    rules: List[Dict[str, Optional[str]]] = []
+    seen = set()
+
+    combined = list(DEFAULT_NON_PII_LIST)
+    if custom_list:
+        combined.extend(custom_list)
+
+    for item in combined:
+        parsed = parse_non_pii_entry(item)
+        if parsed:
+            key = (parsed["word"], parsed["entity"])
+            if key not in seen:
+                seen.add(key)
+                rules.append(parsed)
+    return rules
+
+
+def is_non_pii_match(
+    text: str,
+    entity_type: Optional[str] = None,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
+) -> bool:
+    """Returns True if text (and optional entity tag) matches any active non-PII exclusion rule."""
+    if not text or not text.strip():
+        return False
+    if non_pii_rules is None:
+        non_pii_rules = prepare_non_pii_rules()
+
+    val_clean = text.strip().lower()
+    val_words = [w.strip(".,;:!?()[]{}'\"/\\-") for w in val_clean.split()]
+    val_words = [w for w in val_words if w]
+    norm_entity = normalize_entity_label(entity_type)
+
+    for rule in non_pii_rules:
+        r_word = rule["word"]
+        r_entity = rule["entity"]
+
+        if r_entity is not None and norm_entity is not None and r_entity != norm_entity:
+            continue
+
+        if r_word == val_clean or r_word in val_words:
+            return True
+    return False
+
+
+def filter_non_pii_hits(
+    hits: List[PiiHit],
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
+) -> List[PiiHit]:
+    """Drops PiiHit extractions matching any non-PII exclusion rule."""
+    if not hits:
+        return []
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
+    return [h for h in hits if not is_non_pii_match(h.value, h.label, rules)]
+
 
 @dataclass
 class PiiHit:
@@ -1232,30 +1371,51 @@ def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
     return val.strip(), start, end
 
 
-def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
+def merge_line_spans(
+    spans: List[Dict],
+    original_line: str,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
+) -> List[NerEntity]:
     if not spans:
         return []
+
+    active_rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
 
     snapped_spans: List[Dict] = []
     for s in spans:
         st, en = _snap_to_word_boundary(original_line, s["start"], s["end"])
         clean_val, st, en = _clean_entity_text(original_line, st, en)
 
-        # Discard false positives: empty, numeric, or document abbreviations like S.I.No
+        cat = s["cat"]
+        score = float(s["score"])
+
+        # Model-native validation: Filter low-confidence (< 0.60) capitalized common noun phrases
+        # (e.g. "WATER PIPE LINE LEAKAGE", "No Water Supply") that cased Transformer models
+        # mistakenly tag as ORG/LOC/PER due to title-casing or ALL-CAPS text.
+        clean_words = [w.lower() for w in clean_val.split()]
+        is_common_noun_phrase = any(
+            w in {"water", "pipe", "line", "leakage", "supply", "problem", "issue", "complaint", "service", "drainage", "overflow", "repair", "road", "light", "no", "pls", "please"}
+            for w in clean_words
+        )
+        if is_common_noun_phrase and score < 0.65:
+            continue
+
+        # Discard false positives: empty, numeric, document abbreviations, or matching non-PII rules
         if (
             not clean_val
             or len(clean_val) < 2
             or re.match(r"^\d+$", clean_val)
             or re.match(r"^[A-Z]\.([A-Z]\.)+[A-Za-z]+$", clean_val)
+            or is_non_pii_match(clean_val, cat, active_rules)
         ):
             continue
 
         snapped_spans.append(
             {
-                "cat": s["cat"],
+                "cat": cat,
                 "start": st,
                 "end": en,
-                "score": float(s["score"]),
+                "score": score,
                 "text": clean_val,
                 "word_no": get_word_number(original_line, st),
                 "start_char": st + 1,
@@ -1496,7 +1656,7 @@ def _extract_line_spans_chunked(
 def extract_dual_pass_ner_spans(
     pipe,
     line_str: str,
-    min_score: float = 0.20,
+    min_score: float = 0.50,
     model_name: str = "",
 ) -> List[Dict]:
     """
@@ -1516,6 +1676,18 @@ def extract_dual_pass_ner_spans(
         spans_tc = _extract_line_spans_chunked(
             pipe, tc_line, min_score=min_score, model_name=model_name
         )
+
+    # Validation: If verbatim pass returned 0 entities for ALL-CAPS or Title-Cased text,
+    # do NOT accept artificial truecased spans on common vocabulary phrases (e.g. "Water Pipe Line Leakage")
+    # unless they are verified proper nouns (> 0.92 confidence).
+    if not spans_verbatim and line_str.isupper():
+        valid_tc = []
+        for s in spans_tc:
+            clean_w = [w.lower() for w in s["text"].split()]
+            if any(w in {"water", "pipe", "line", "leakage", "supply", "problem", "issue", "no", "pls", "please"} for w in clean_w) and s["score"] < 0.92:
+                continue
+            valid_tc.append(s)
+        return valid_tc
 
     return spans_verbatim + spans_tc
 
@@ -1687,11 +1859,13 @@ def _store_line_ner_results(
     line_text: str,
     model_spans: Dict[str, List[Dict]],
     model_labels: List[str],
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     model_line_ents: Dict[str, List[NerEntity]] = {}
     for model_lbl in model_labels:
         model_line_ents[model_lbl] = merge_line_spans(
-            model_spans.get(model_lbl, []), line_text
+            model_spans.get(model_lbl, []), line_text, non_pii_rules=rules
         )
 
     hybrid_spans = (
@@ -1699,7 +1873,7 @@ def _store_line_ner_results(
         + model_spans.get(NER_MODELS["IndicNER"][0], [])
         + model_spans.get(NER_MODELS["XLM_RoBERTa"][0], [])
     )
-    model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, line_text)
+    model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, line_text, non_pii_rules=rules)
 
     all_line_ents = set(
         (e.category, e.text)
@@ -1770,9 +1944,9 @@ NER_TORCH_THREADS = int(os.getenv("NER_TORCH_THREADS", "0"))
 # (display label, model id, use_fast, min score) — mirrors run_line_by_line_ner's
 # `pipes` mapping, which is what HYBRID_KEY merges.
 _HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
-    (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.20),
-    (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.20),
-    (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.45),
+    (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.50),
+    (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.65),
+    (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.50),
 ]
 
 
@@ -1780,22 +1954,9 @@ def run_corpus_line_ner(
     lines: List[str],
     batch_size: int = NER_CORPUS_BATCH_SIZE,
     release_models: bool = False,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> List[List[NerEntity]]:
-    """Hybrid NER over a whole corpus of lines, returning one entity list per line.
-
-    Output is positionally aligned with `lines` and carries the same merged
-    entities that run_line_by_line_ner stores under HYBRID_KEY.
-
-    Lines are length-sorted so that if tensor batching is enabled (see
-    NER_TENSOR_BATCH_SIZE) each batch pads to roughly its own longest member
-    rather than the corpus maximum. Models run one after another over the full
-    corpus rather than concurrently: on CPU they would otherwise fight over the
-    same torch thread pool, and holding one model resident at a time keeps peak
-    RSS to roughly a third.
-
-    release_models evicts each pipe from the cache once its pass is done — worth
-    it for a one-shot batch job, where nothing reuses the weights afterwards.
-    """
+    """Hybrid NER over a whole corpus of lines, returning one entity list per line."""
     if not lines:
         return []
     if not _TRANSFORMERS_AVAILABLE:
@@ -1803,8 +1964,6 @@ def run_corpus_line_ner(
         return [[] for _ in lines]
 
     batch_size = max(1, batch_size)
-    # Longest first: the slowest batches land while the run is young, so the
-    # throughput estimate printed below settles on a pessimistic figure early.
     order = sorted(range(len(lines)), key=lambda i: len(lines[i]), reverse=True)
     spans_per_line: List[List[Dict]] = [[] for _ in lines]
 
@@ -1812,7 +1971,9 @@ def run_corpus_line_ner(
     if NER_TORCH_THREADS > 0:
         _torch.set_num_threads(NER_TORCH_THREADS)
     try:
-        return _corpus_ner_passes(lines, order, spans_per_line, batch_size, release_models)
+        return _corpus_ner_passes(
+            lines, order, spans_per_line, batch_size, release_models, non_pii_rules=non_pii_rules
+        )
     finally:
         _torch.set_num_threads(previous_threads)
 
@@ -1823,8 +1984,10 @@ def _corpus_ner_passes(
     spans_per_line: List[List[Dict]],
     batch_size: int,
     release_models: bool,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> List[List[NerEntity]]:
     """One full-corpus pass per model, then merge each line's spans (see caller)."""
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     tensor_batch = _tensor_batch_size()
     print(
         f"  [NER] {len(lines)} lines, tensor batch {tensor_batch}, "
@@ -1870,7 +2033,10 @@ def _corpus_ner_passes(
             del pipe
             gc.collect()
 
-    return [merge_line_spans(spans_per_line[i], lines[i]) for i in range(len(lines))]
+    return [
+        merge_line_spans(spans_per_line[i], lines[i], non_pii_rules=rules)
+        for i in range(len(lines))
+    ]
 
 
 def run_line_by_line_ner(
@@ -1878,6 +2044,7 @@ def run_line_by_line_ner(
     include_bert: bool = True,
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
     """Load each NER model once, then fan lines out to dedicated worker threads.
 
@@ -1912,9 +2079,9 @@ def run_line_by_line_ner(
     )
 
     pipes = {
-        NER_MODELS["HiNER"][0]: (hiner_pipe, 0.20),
-        NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.20),
-        NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.45),
+        NER_MODELS["HiNER"][0]: (hiner_pipe, 0.50),
+        NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.65),
+        NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.50),
     }
     # BERT MODEL (COMMENTED OUT - uncomment to re-enable BERT model)
     # if include_bert:
@@ -1988,6 +2155,7 @@ def run_line_by_line_ner(
     idle_rounds = 0
     max_idle = int(NER_WORKER_JOIN_TIMEOUT_S / NER_RESULT_GET_TIMEOUT_S) + 1
 
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     while workers_done < len(workers) and idle_rounds < max_idle:
         try:
             item = result_queue.get(timeout=NER_RESULT_GET_TIMEOUT_S)
@@ -2019,6 +2187,7 @@ def run_line_by_line_ner(
                 line_lookup[key],
                 pending.pop(key),
                 all_model_labels,
+                non_pii_rules=rules,
             )
 
     dispatcher.join(timeout=5)
@@ -2044,6 +2213,7 @@ def run_line_by_line_ner(
             line_lookup[key],
             model_spans,
             model_labels,
+            non_pii_rules=rules,
         )
         pending.pop(key, None)
 
@@ -2057,10 +2227,15 @@ def run_line_by_line_ner(
     )
 
 
-def scan_records_pii(records: List[FileRecord]):
+def scan_records_pii(
+    records: List[FileRecord],
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
+):
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     for rec in records:
         regex_hits, presidio_hits = full_pii_scan(rec.raw_text)
-        rec.pii_hits = merge_pii_hits(regex_hits, presidio_hits)
+        merged = merge_pii_hits(regex_hits, presidio_hits)
+        rec.pii_hits = filter_non_pii_hits(merged, rules)
 
 
 def analyze_records(
@@ -2068,13 +2243,15 @@ def analyze_records(
     include_bert: bool = True,
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
+    non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
     """Dispatcher overlap: Regex/Presidio PII runs while NER workers consume lines."""
+    rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     pii_errors: List[BaseException] = []
 
     def _pii_worker():
         try:
-            scan_records_pii(records)
+            scan_records_pii(records, rules)
         except BaseException as exc:
             pii_errors.append(exc)
 
@@ -2085,6 +2262,7 @@ def analyze_records(
         include_bert=include_bert,
         batch_size=batch_size,
         queue_size=queue_size,
+        non_pii_rules=rules,
     )
     pii_thread.join()
     if pii_errors:
@@ -2561,6 +2739,7 @@ def process_text_string(
     label: str = "inline_input",
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
+    custom_non_pii_list: Optional[List[Any]] = None,
 ) -> List[FileRecord]:
     text = text.replace("\\n", "\n").replace("\\t", "\t")
     text = text.strip("'\"")
@@ -2571,6 +2750,7 @@ def process_text_string(
         )
         return []
 
+    rules = prepare_non_pii_rules(custom_non_pii_list)
     lang = detect_language(text)
     rec = FileRecord(
         path="<inline>",
@@ -2585,6 +2765,7 @@ def process_text_string(
         [rec],
         batch_size=max(1, batch_size),
         queue_size=max(8, queue_size),
+        non_pii_rules=rules,
     )
     build_excel([rec], output_path, presidio_ok)
     build_json([rec], output_path)
@@ -2648,6 +2829,16 @@ def parse_args():
         default=NER_QUEUE_MAXSIZE,
         help="Bounded queue size for NER backpressure (default 64).",
     )
+    ap.add_argument(
+        "--non-pii-list",
+        default=None,
+        help="Comma-separated or JSON list of words/rules to exclude (e.g., 'PLS:ORG,PLEASE').",
+    )
+    ap.add_argument(
+        "--non-pii-file",
+        default=None,
+        help="Path to JSON file containing custom non-PII exclusion words/rules list.",
+    )
     if any("jupyter" in arg or "kernel" in arg for arg in sys.argv):
         return ap.parse_args(args=[])
     return ap.parse_args()
@@ -2669,6 +2860,27 @@ def main():
 
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
+
+    custom_non_pii = []
+    if args.non_pii_file and os.path.exists(args.non_pii_file):
+        try:
+            with open(args.non_pii_file, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+                if isinstance(loaded, list):
+                    custom_non_pii.extend(loaded)
+        except Exception as exc:
+            print(f"  [WARN] Could not read non-PII file {args.non_pii_file}: {exc}", flush=True)
+
+    if args.non_pii_list:
+        try:
+            if args.non_pii_list.strip().startswith("["):
+                custom_non_pii.extend(json.loads(args.non_pii_list))
+            else:
+                custom_non_pii.extend(item.strip() for item in args.non_pii_list.split(",") if item.strip())
+        except Exception:
+            custom_non_pii.extend(item.strip() for item in args.non_pii_list.split(",") if item.strip())
+
+    rules = prepare_non_pii_rules(custom_non_pii)
 
     # Presidio check (COMMENTED OUT - Presidio disabled)
     # presidio_ok = _PRESIDIO_AVAILABLE and (_get_presidio_engine() is not None)
@@ -2693,6 +2905,7 @@ def main():
             output_path=args.output,
             batch_size=max(1, args.ner_batch_size),
             queue_size=max(8, args.queue_size),
+            custom_non_pii_list=custom_non_pii,
         )
         return
 
@@ -2730,6 +2943,7 @@ def main():
         records,
         batch_size=max(1, args.ner_batch_size),
         queue_size=max(8, args.queue_size),
+        non_pii_rules=rules,
     )
     build_excel(records, args.output, presidio_ok)
     build_json(records, args.output)
