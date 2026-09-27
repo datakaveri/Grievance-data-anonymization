@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  PIPELINE.PY — Multi-Format PII Detection & NER Comparison Pipeline          ║
+# ║  MAIN.PY — Multi-Format PII Detection & NER Comparison Pipeline             ║
 # ║  Supports: .txt, .doc, .docx, .html, .json, .csv (single file or folder)     ║
 # ║  PII Detection: Regex + Presidio (overlaps NER via dispatcher thread)        ║
 # ║  NER: Queue-driven parallel HiNER / IndicNER / XLM-R (+ optional BERT)       ║
@@ -26,7 +26,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import openpyxl
 import pandas as pd
@@ -34,6 +34,9 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore")
+
+# Package version definition
+__version__ = "1.0.0"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS — POSITION & WORD CALCULATIONS
@@ -63,7 +66,8 @@ try:
 except ImportError:
     pass
 
-DEFAULT_INPUT_PATH = "/home/gogul/Documents/Grievance-data-anonymization/app/data/sample_complaint.txt"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_INPUT_PATH = str(PROJECT_ROOT / "data" / "sample_complaint.txt")
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
 DEFAULT_HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 
@@ -100,12 +104,6 @@ try:
 except ImportError:
     _BS4_AVAILABLE = False
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DEFAULT PATHS & CONFIGURATION
-# ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_INPUT_PATH = "/home/gogul/Documents/Grievance-data-anonymization/app/data/sample_complaint.txt"
-DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
-
 NER_MODELS: Dict[str, Tuple[str, str]] = {
     "HiNER": (
         "HiNER (IIT Bombay / MuRIL)",
@@ -120,8 +118,6 @@ NER_MODELS: Dict[str, Tuple[str, str]] = {
 }
 HYBRID_KEY = "Hybrid (HiNER + IndicNER + XLM-RoBERTa)"
 
-# Queue-driven NER (see NER_Parallel_Pipeline_Short_Architecture.docx):
-# mini-batches of 16–32 lines cut tokenizer overhead; bounded queues apply backpressure.
 NER_LINE_BATCH_SIZE = 24
 NER_QUEUE_MAXSIZE = 64
 NER_RESULT_GET_TIMEOUT_S = 1.0
@@ -177,7 +173,6 @@ DEFAULT_NON_PII_LIST: List[Union[str, Dict[str, Any]]] = [
     {"word": "SR.NO", "entity": "ALL"},
     {"word": "NO", "entity": "ALL"},
     {"word": "DATE", "entity": "ALL"},
-    # Hindi / Hinglish common non-pii false positives
     {"word": "कृपया", "entity": "ALL"},
     {"word": "महोदय", "entity": "ALL"},
     {"word": "महोदया", "entity": "ALL"},
@@ -426,7 +421,7 @@ def read_html(path: str) -> str:
         soup = BeautifulSoup(fh.read(), "html.parser")
     for tag in soup(["script", "style", "head", "meta"]):
         tag.decompose()
-    lines = [elem.strip() for elem in soup.find_all(text=True) if elem.strip()]
+    lines = [elem.strip() for elem in soup.find_all(string=True) if elem.strip()]
     return "\n".join(lines)
 
 
@@ -590,32 +585,6 @@ _presidio_engine: Optional[object] = None
 
 
 def _get_presidio_engine():
-    # PRESIDIO MODEL (COMMENTED OUT - uncomment to re-enable Presidio engine)
-    # global _presidio_engine
-    # if _presidio_engine is not None:
-    #     return _presidio_engine
-    # if not _PRESIDIO_AVAILABLE:
-    #     return None
-    # try:
-    #     model_name = "en_core_web_lg"
-    #     try:
-    #         import spacy
-    # 
-    #         spacy.load(model_name)
-    #     except Exception:
-    #         model_name = "en_core_web_sm"
-    # 
-    #     configuration = {
-    #         "nlp_engine_name": "spacy",
-    #         "models": [{"lang_code": "en", "model_name": model_name}],
-    #     }
-    #     provider = NlpEngineProvider(nlp_configuration=configuration)
-    #     nlp_engine = provider.create_engine()
-    #     _presidio_engine = AnalyzerEngine(nlp_engine=nlp_engine)
-    #     return _presidio_engine
-    # except Exception as e:
-    #     print(f"  [WARN] Could not initialize Presidio: {e}", flush=True)
-    #     return None
     return None
 
 
@@ -1013,28 +982,7 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
 
 def full_pii_scan(text: str) -> Tuple[List[PiiHit], List[PiiHit]]:
     regex_hits = scan_text_line_by_line(text)
-
     presidio_hits: List[PiiHit] = []
-    # PRESIDIO MODEL (COMMENTED OUT - uncomment to re-enable Presidio scan)
-    # engine = _get_presidio_engine()
-    # if engine:
-    #     lines = text.splitlines()
-    #     raw_presidio: List[PiiHit] = []
-    #     for lno, line in enumerate(lines, 1):
-    #         for h in _run_presidio_on_line(line.strip(), engine):
-    #             h.line_no = lno
-    #             raw_presidio.append(h)
-    #     seen_p: set = set()
-    #     for h in raw_presidio:
-    #         key = (
-    #             h.line_no,
-    #             h.label.upper(),
-    #             re.sub(r"[\s\-]", "", h.value).lower(),
-    #         )
-    #         if key not in seen_p and h.value.strip():
-    #             seen_p.add(key)
-    #             presidio_hits.append(h)
-
     return regex_hits, presidio_hits
 
 
@@ -1042,21 +990,17 @@ def merge_pii_hits(
     regex_hits: List[PiiHit], presidio_hits: List[PiiHit]
 ) -> List[PiiHit]:
     merged = list(regex_hits)
-
     for p in presidio_hits:
         p_val_clean = re.sub(r"[\s\-]", "", p.value).lower()
         overlap_found = False
-
         for r in regex_hits:
             if r.line_no == p.line_no:
                 r_val_clean = re.sub(r"[\s\-]", "", r.value).lower()
                 if p_val_clean in r_val_clean or r_val_clean in p_val_clean:
                     overlap_found = True
                     break
-
         if not overlap_found:
             merged.append(p)
-
     return merged
 
 
@@ -1072,11 +1016,7 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
     if "AADHAAR" in lbl:
         d = re.sub(r"\D", "", val)
         anon = f"XXXX XXXX {d[-4:]}" if len(d) == 12 else "[Aadhaar Redacted]"
-        return (
-            "Partial Masking",
-            anon,
-            "First 8 digits masked, last 4 visible",
-        )
+        return ("Partial Masking", anon, "First 8 digits masked, last 4 visible")
     elif "PAN" in lbl:
         c = re.sub(r"\s+", "", val)
         anon = f"{c[:5]}****{c[-1]}" if len(c) == 10 else "XXXXX****X"
@@ -1084,60 +1024,32 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
     elif "PHONE" in lbl:
         d = re.sub(r"\D", "", val)
         anon = f"XXXXXX{d[-4:]}" if len(d) >= 10 else "XXXXXXXXXX"
-        return (
-            "Partial Masking",
-            anon,
-            "First 6 digits masked, last 4 visible",
-        )
+        return ("Partial Masking", anon, "First 6 digits masked, last 4 visible")
     elif "EMAIL" in lbl:
         if "@" in val:
             local, domain = val.split("@", 1)
-            mk = (
-                local[:2] + "*" * max(1, len(local) - 2)
-                if len(local) > 2
-                else local[0] + "*"
-            )
+            mk = local[:2] + "*" * max(1, len(local) - 2) if len(local) > 2 else local[0] + "*"
             anon = f"{mk}@{domain}"
         else:
             anon = "*****@***.com"
-        return (
-            "Domain-Preserving Masking",
-            anon,
-            "Local-part masked, domain kept",
-        )
+        return ("Domain-Preserving Masking", anon, "Local-part masked, domain kept")
     elif "BANK" in lbl or "ACCOUNT" in lbl:
         d = re.sub(r"\D", "", val)
         anon = "*" * (len(d) - 4) + d[-4:] if len(d) >= 4 else "XXXXXXXXXXXX"
         return ("Partial Masking", anon, "All but last 4 digits masked")
     elif "CARD" in lbl or "CREDIT" in lbl:
         d = re.sub(r"\D", "", val)
-        anon = (
-            f"XXXX-XXXX-XXXX-{d[-4:]}"
-            if len(d) >= 16
-            else "XXXX-XXXX-XXXX-XXXX"
-        )
-        return (
-            "Tokenization",
-            anon,
-            "Full card number tokenized; last 4 kept",
-        )
+        anon = f"XXXX-XXXX-XXXX-{d[-4:]}" if len(d) >= 16 else "XXXX-XXXX-XXXX-XXXX"
+        return ("Tokenization", anon, "Full card number tokenized; last 4 kept")
     elif "PERSON" in lbl or "NAME" in lbl or "PER" in lbl:
         parts = val.split()
         if parts:
             anon = parts[0][0] + ". " + " ".join(p[0] + "." for p in parts[1:])
         else:
             anon = "[NAME REDACTED]"
-        return (
-            "Initial-Only Masking",
-            anon,
-            "First initial retained; rest reduced to initials",
-        )
+        return ("Initial-Only Masking", anon, "First initial retained; rest reduced to initials")
     elif "DATE" in lbl or "DOB" in lbl:
-        return (
-            "Date Generalization",
-            "[DATE REDACTED]",
-            "Full date replaced with placeholder",
-        )
+        return ("Date Generalization", "[DATE REDACTED]", "Full date replaced with placeholder")
     elif "AGE" in lbl:
         m = re.search(r"\d+", val)
         if m:
@@ -1146,27 +1058,15 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
             anon = f"[Age range: {bucket}]"
         else:
             anon = "[Age Redacted]"
-        return (
-            "Generalization",
-            anon,
-            "Exact age bucketed into decade range",
-        )
+        return ("Generalization", anon, "Exact age bucketed into decade range")
     elif "PINCODE" in lbl:
         d = re.sub(r"\D", "", val)
         anon = d[:3] + "XXX" if len(d) >= 6 else "XXXXXX"
         return ("Partial Masking", anon, "Last 3 digits of pincode masked")
     elif "LOCATION" in lbl or "LOC" in lbl:
-        return (
-            "Generalization",
-            "[LOCATION REDACTED]",
-            "Location replaced with placeholder",
-        )
+        return ("Generalization", "[LOCATION REDACTED]", "Location replaced with placeholder")
     elif "ORGANIZATION" in lbl or "ORG" in lbl:
-        return (
-            "Generalization",
-            "[ORGANIZATION REDACTED]",
-            "Organization replaced with placeholder",
-        )
+        return ("Generalization", "[ORGANIZATION REDACTED]", "Organization replaced with placeholder")
     else:
         anon = hashlib.sha256(val.encode()).hexdigest()[:16].upper()
         return ("One-Way Hashing", f"SHA256:{anon}", "Value hashed with SHA-256")
@@ -1176,53 +1076,22 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
 # NER ENGINE & SPAN MERGING LOGIC
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Model imports & PyTorch CPU thread configuration
-
 try:
     import torch as _torch
-    # Limit PyTorch CPU thread contention when running multiple parallel model workers
     if hasattr(_torch, "set_num_threads"):
         _torch.set_num_threads(min(4, os.cpu_count() or 4))
 
-    from transformers import (
-        AutoModelForTokenClassification,
-        AutoTokenizer,
-    )
-    from transformers import (
-        pipeline as _hf_pipeline,
-    )
+    from transformers import AutoModelForTokenClassification, AutoTokenizer
+    from transformers import pipeline as _hf_pipeline
 
     _TRANSFORMERS_AVAILABLE = True
 except ImportError:
     _TRANSFORMERS_AVAILABLE = False
 
-# GPU check (COMMENTED OUT - forced CPU execution mode)
-# _NER_DEVICE = -1
-# if _TRANSFORMERS_AVAILABLE and _torch.cuda.is_available():
-#     try:
-#         _test_t = _torch.zeros(1, device="cuda:0")
-#         del _test_t
-#         if _torch.cuda.is_available():
-#             _torch.cuda.empty_cache()
-#         _NER_DEVICE = 0
-#     except Exception as _cuda_err:
-#         print(f"  [NER] GPU check failed ({_cuda_err}). Falling back to CPU mode.", flush=True)
-#         _NER_DEVICE = -1
-
-# _NER_DEVICE_STR = "GPU" if _NER_DEVICE == 0 else "CPU"
 _NER_DEVICE = -1
 _NER_DEVICE_STR = "CPU"
-
-# # Concurrent CUDA calls from multiple model threads are unsafe; CPU can overlap.
-# _NER_INFER_LOCK = threading.Lock() if _NER_DEVICE == 0 else None
 _NER_INFER_LOCK = None
-
 _NER_PIPELINE_CACHE: Dict[str, object] = {}
-
-# Dynamic INT8 quantization of the Linear layers. Faster, but on the PHED corpus
-# it recovered 386 entities where fp32 found 481, with only 290 shared — for a
-# redaction pipeline that is a fifth of the names and locations going unmasked,
-# so it stays off unless a deployment has measured the trade-off on its own data.
 _NER_QUANTIZE = os.getenv("NER_QUANTIZE", "").strip().lower() in {"1", "true", "yes"}
 
 
@@ -1247,15 +1116,8 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         return None
     try:
         hf_token = os.getenv("HF_TOKEN") or None
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            token=hf_token,
-            use_fast=use_fast,
-        )
-        model = AutoModelForTokenClassification.from_pretrained(
-            model_id,
-            token=hf_token,
-        )
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, use_fast=use_fast)
+        model = AutoModelForTokenClassification.from_pretrained(model_id, token=hf_token)
         model.eval()
         model = _maybe_quantize(model, model_id)
         ner_pipe = _hf_pipeline(
@@ -1268,40 +1130,13 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         _NER_PIPELINE_CACHE[model_id] = ner_pipe
         return ner_pipe
     except Exception as exc:
-        if _NER_DEVICE == 0:
-            print(
-                f"  [NER] GPU load failed for {model_id}: {exc}. Retrying on CPU...",
-                flush=True,
-            )
-            try:
-                if _torch.cuda.is_available():
-                    _torch.cuda.empty_cache()
-                ner_pipe = _hf_pipeline(
-                    task="ner",
-                    model=model,
-                    tokenizer=tokenizer,
-                    aggregation_strategy="simple",
-                    device=-1,
-                )
-                _NER_PIPELINE_CACHE[model_id] = ner_pipe
-                return ner_pipe
-            except Exception as exc2:
-                print(f"  [NER] CPU load failed for {model_id}: {exc2}", flush=True)
-                _NER_PIPELINE_CACHE[model_id] = None
-                return None
         print(f"  [NER] Could not load {model_id}: {exc}", flush=True)
         _NER_PIPELINE_CACHE[model_id] = None
         return None
 
 
 def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
-    """
-    Expands character indices to complete word boundaries while strictly
-    halting at delimiter boundaries (/ , ; : \\).
-    """
     STRICT_DELIMITERS = set(" /\\:;,()[]{}<>\"'\t\n\r")
-
-    # Expand start backwards
     while start > 0:
         prev = text[start - 1]
         if prev in STRICT_DELIMITERS:
@@ -1312,17 +1147,12 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
             prev == "."
             and start > 1
             and text[start - 2].isalpha()
-            and (
-                start == 2
-                or text[start - 3] in STRICT_DELIMITERS
-                or text[start - 3].isspace()
-            )
+            and (start == 2 or text[start - 3] in STRICT_DELIMITERS or text[start - 3].isspace())
         ):
             start -= 1
         else:
             break
 
-    # Expand end forwards
     while end < len(text):
         nxt = text[end]
         if nxt in STRICT_DELIMITERS:
@@ -1338,27 +1168,16 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
 
 
 def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
-    """
-    Cleans leading and trailing punctuation, isolated single characters,
-    and slash-prefixes (e.g., 'o.Name', 'S/o Name', 'Name s') from NER spans.
-    """
     val = text[start:end]
-
-    # 1. Strip leading punctuation, slashes, and dangling prefix letters like "o.", "s.", "d."
-    match_prefix = re.match(
-        r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
-    )
+    match_prefix = re.match(r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val)
     while match_prefix and match_prefix.end() > 0:
         cut = match_prefix.end()
         if cut >= len(val):
             break
         start += cut
         val = text[start:end]
-        match_prefix = re.match(
-            r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
-        )
+        match_prefix = re.match(r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val)
 
-    # 2. Strip trailing punctuation and dangling sub-word fragments (e.g. trailing " s")
     match_suffix = re.search(r"(\s+[a-zA-Z]|[\s:\-.,'\"/()]+)$", val)
     while match_suffix and match_suffix.start() < len(val):
         cut = len(val) - match_suffix.start()
@@ -1380,27 +1199,13 @@ def merge_line_spans(
         return []
 
     active_rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
-
     snapped_spans: List[Dict] = []
     for s in spans:
+        cat = s["cat"]
+        score = float(s["score"])
         st, en = _snap_to_word_boundary(original_line, s["start"], s["end"])
         clean_val, st, en = _clean_entity_text(original_line, st, en)
 
-        cat = s["cat"]
-        score = float(s["score"])
-
-        # Model-native validation: Filter low-confidence (< 0.60) capitalized common noun phrases
-        # (e.g. "WATER PIPE LINE LEAKAGE", "No Water Supply") that cased Transformer models
-        # mistakenly tag as ORG/LOC/PER due to title-casing or ALL-CAPS text.
-        clean_words = [w.lower() for w in clean_val.split()]
-        is_common_noun_phrase = any(
-            w in {"water", "pipe", "line", "leakage", "supply", "problem", "issue", "complaint", "service", "drainage", "overflow", "repair", "road", "light", "no", "pls", "please"}
-            for w in clean_words
-        )
-        if is_common_noun_phrase and score < 0.65:
-            continue
-
-        # Discard false positives: empty, numeric, document abbreviations, or matching non-PII rules
         if (
             not clean_val
             or len(clean_val) < 2
@@ -1426,21 +1231,14 @@ def merge_line_spans(
     if not snapped_spans:
         return []
 
-    # 1. Merge contiguous identical-category spans
-    sorted_spans = sorted(
-        snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"]))
-    )
+    sorted_spans = sorted(snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"])))
     same_cat_merged: List[Dict] = []
 
     for s in sorted_spans:
         target = None
         for m in same_cat_merged:
-            if m["cat"] == s["cat"] and (
-                s["start"] <= m["end"] + 1 and m["start"] <= s["end"] + 1
-            ):
-                intervening = original_line[
-                    min(m["start"], s["start"]) : max(m["end"], s["end"])
-                ]
+            if m["cat"] == s["cat"] and (s["start"] <= m["end"] + 1 and m["start"] <= s["end"] + 1):
+                intervening = original_line[min(m["start"], s["start"]) : max(m["end"], s["end"])]
                 if not any(d in intervening for d in ["/", "\\", ";", ":"]):
                     target = m
                     break
@@ -1450,9 +1248,7 @@ def merge_line_spans(
         else:
             target["start"] = min(target["start"], s["start"])
             target["end"] = max(target["end"], s["end"])
-            target_text, t_st, t_en = _clean_entity_text(
-                original_line, target["start"], target["end"]
-            )
+            target_text, t_st, t_en = _clean_entity_text(original_line, target["start"], target["end"])
             target["text"] = target_text
             target["start"] = t_st
             target["end"] = t_en
@@ -1461,14 +1257,12 @@ def merge_line_spans(
             target["start_char"] = target["start"] + 1
             target["end_char"] = target["end"]
 
-    # 2. Non-Maximum Suppression (Longest span with highest confidence)
     same_cat_merged.sort(key=lambda x: (-(x["end"] - x["start"]), -x["score"]))
     final_merged: List[Dict] = []
 
     for candidate in same_cat_merged:
         if not any(
-            candidate["start"] < chosen["end"]
-            and chosen["start"] < candidate["end"]
+            candidate["start"] < chosen["end"] and chosen["start"] < candidate["end"]
             for chosen in final_merged
         ):
             final_merged.append(candidate)
@@ -1500,11 +1294,13 @@ def merge_line_spans(
 def _parse_ner_items(
     results,
     line_str: str,
-    min_score: float = 0.20,
+    min_score: float = 0.50,
     model_name: str = "",
 ) -> List[Dict]:
     if not results:
         return []
+
+    cutoff = min_score if min_score > 0 else 0.50
 
     raw_spans = []
     for item in results:
@@ -1514,7 +1310,7 @@ def _parse_ner_items(
         group = str(item.get("entity_group", item.get("entity", ""))).upper()
         group = re.sub(r"^[BI]-", "", group)
 
-        if score < min_score:
+        if score < cutoff:
             continue
 
         cat = None
@@ -1547,23 +1343,9 @@ def _parse_ner_items(
 
 
 def _run_hf_pipe(pipe, texts, batch_size: Optional[int] = None):
-    """Run a HuggingFace NER pipe with torch.inference_mode() for optimized CPU execution.
-
-    A HuggingFace pipeline handed a list still defaults to batch_size=1, i.e. one
-    forward pass per item — passing the list alone buys nothing. `batch_size` opts
-    into real tensor batching; leave it None to keep the one-at-a-time behaviour.
-    """
     kwargs = {} if batch_size is None else {"batch_size": batch_size}
-
     if _TRANSFORMERS_AVAILABLE and hasattr(_torch, "inference_mode"):
         with _torch.inference_mode():
-            if _NER_INFER_LOCK is not None:
-                with _NER_INFER_LOCK:
-                    return pipe(texts, **kwargs)
-            return pipe(texts, **kwargs)
-
-    if _NER_INFER_LOCK is not None:
-        with _NER_INFER_LOCK:
             return pipe(texts, **kwargs)
     return pipe(texts, **kwargs)
 
@@ -1571,17 +1353,15 @@ def _run_hf_pipe(pipe, texts, batch_size: Optional[int] = None):
 def _extract_raw_spans(
     pipe,
     line_str: str,
-    min_score: float = 0.20,
+    min_score: float = 0.50,
     model_name: str = "",
 ) -> List[Dict]:
     if pipe is None or not line_str.strip():
         return []
-
     try:
         results = _run_hf_pipe(pipe, line_str)
     except Exception:
         return []
-
     return _parse_ner_items(results, line_str, min_score=min_score, model_name=model_name)
 
 
@@ -1595,16 +1375,13 @@ def _chunk_line_with_offsets(
         for m in re.finditer(r"[^.\n।]*[.\n।]|[^.\n।]+$", line)
         if m.group().strip()
     ]
-
     chunks: List[Tuple[int, str]] = []
     cur_start: Optional[int] = None
     cur: str = ""
 
     for start, piece in pieces:
         candidate = cur + piece
-        token_count = len(
-            tokenizer(candidate, add_special_tokens=True)["input_ids"]
-        )
+        token_count = len(tokenizer(candidate, add_special_tokens=True)["input_ids"])
         if cur and token_count > max_tokens:
             chunks.append((cur_start, cur))
             cur_start = start
@@ -1623,28 +1400,21 @@ def _chunk_line_with_offsets(
 def _extract_line_spans_chunked(
     pipe,
     line_str: str,
-    min_score: float = 0.20,
+    min_score: float = 0.50,
     model_name: str = "",
 ) -> List[Dict]:
     if pipe is None or not line_str.strip():
         return []
-
     tokenizer = pipe.tokenizer
     max_tokens = 380
 
     token_count = len(tokenizer(line_str, add_special_tokens=True)["input_ids"])
     if token_count <= max_tokens:
-        return _extract_raw_spans(
-            pipe, line_str, min_score=min_score, model_name=model_name
-        )
+        return _extract_raw_spans(pipe, line_str, min_score=min_score, model_name=model_name)
 
     all_spans: List[Dict] = []
-    for char_offset, chunk in _chunk_line_with_offsets(
-        line_str, tokenizer, max_tokens
-    ):
-        chunk_spans = _extract_raw_spans(
-            pipe, chunk, min_score=min_score, model_name=model_name
-        )
+    for char_offset, chunk in _chunk_line_with_offsets(line_str, tokenizer, max_tokens):
+        chunk_spans = _extract_raw_spans(pipe, chunk, min_score=min_score, model_name=model_name)
         for s in chunk_spans:
             s["start"] += char_offset
             s["end"] += char_offset
@@ -1659,17 +1429,9 @@ def extract_dual_pass_ner_spans(
     min_score: float = 0.50,
     model_name: str = "",
 ) -> List[Dict]:
-    """
-    Performs pure model inference in two passes:
-      1. Verbatim Pass: processes line_str as written.
-      2. Truecased Pass: processes truecase_line(line_str).
-    Because truecase_line preserves character length and index offsets exactly,
-    spans detected in both passes map 100% cleanly to original text character offsets.
-    """
     spans_verbatim = _extract_line_spans_chunked(
         pipe, line_str, min_score=min_score, model_name=model_name
     )
-
     tc_line = truecase_line(line_str)
     spans_tc = []
     if tc_line != line_str:
@@ -1677,28 +1439,14 @@ def extract_dual_pass_ner_spans(
             pipe, tc_line, min_score=min_score, model_name=model_name
         )
 
-    # Validation: If verbatim pass returned 0 entities for ALL-CAPS or Title-Cased text,
-    # do NOT accept artificial truecased spans on common vocabulary phrases (e.g. "Water Pipe Line Leakage")
-    # unless they are verified proper nouns (> 0.92 confidence).
-    if not spans_verbatim and line_str.isupper():
-        valid_tc = []
-        for s in spans_tc:
-            clean_w = [w.lower() for w in s["text"].split()]
-            if any(w in {"water", "pipe", "line", "leakage", "supply", "problem", "issue", "no", "pls", "please"} for w in clean_w) and s["score"] < 0.92:
-                continue
-            valid_tc.append(s)
-        return valid_tc
+    if not spans_verbatim and (line_str.isupper() or line_str.islower()):
+        # Discard artificial true-case ORG/LOC candidates when verbatim pass on original text has no entities
+        return [s for s in spans_tc if s.get("cat") == "PERSON"]
 
     return spans_verbatim + spans_tc
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# QUEUE-DRIVEN PARALLEL NER (fan-out / fan-in)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 def _normalize_pipe_batch_output(raw, batch_len: int) -> List:
-    """HuggingFace returns a flat entity list for one string, nested lists for a batch."""
     if batch_len <= 0:
         return []
     if batch_len == 1:
@@ -1723,28 +1471,22 @@ def _infer_line_batch(
     model_name: str,
     batch_size: Optional[int] = None,
 ) -> List[ModelLineResult]:
-    """Mini-batch short lines through the pipe; chunk long lines individually."""
     results: List[ModelLineResult] = []
     if not tasks:
         return results
     if pipe is None:
-        return [
-            ModelLineResult(t.doc_id, t.line_no, model_name, []) for t in tasks
-        ]
+        return [ModelLineResult(t.doc_id, t.line_no, model_name, []) for t in tasks]
 
     tokenizer = pipe.tokenizer
     max_tokens = 380
     short_tasks: List[LineTask] = []
     long_tasks: List[LineTask] = []
     for task in tasks:
-        # Fast character/word count heuristic to avoid heavy tokenizer Python call overhead
         if len(task.line_text) <= 1200 or len(task.line_text.split()) <= 180:
             short_tasks.append(task)
         else:
             try:
-                token_count = len(
-                    tokenizer(task.line_text, add_special_tokens=True)["input_ids"]
-                )
+                token_count = len(tokenizer(task.line_text, add_special_tokens=True)["input_ids"])
             except Exception:
                 token_count = max_tokens + 1
             if token_count <= max_tokens:
@@ -1753,45 +1495,9 @@ def _infer_line_batch(
                 long_tasks.append(task)
 
     span_map: Dict[Tuple[int, int], List[Dict]] = {}
-    if short_tasks:
-        batch_requests = []
-        for task in short_tasks:
-            text = task.line_text
-            # If line is ALL-CAPS, true-case it to improve NER entity recognition without duplicate passes
-            if text.isupper():
-                text = truecase_line(text)
-                batch_requests.append((task, True, text))
-            else:
-                batch_requests.append((task, False, text))
-
-        texts = [req[2] for req in batch_requests]
-        try:
-            raw = _run_hf_pipe(pipe, texts, batch_size=batch_size)
-            batched = _normalize_pipe_batch_output(raw, len(texts))
-            for (task, is_tc, text_str), items in zip(batch_requests, batched):
-                spans = _parse_ner_items(
-                    items,
-                    text_str,
-                    min_score=min_score,
-                    model_name=model_name,
-                )
-                key = (task.doc_id, task.line_no)
-                span_map.setdefault(key, []).extend(spans)
-        except Exception:
-            for task in short_tasks:
-                span_map[(task.doc_id, task.line_no)] = extract_dual_pass_ner_spans(
-                    pipe,
-                    task.line_text,
-                    min_score=min_score,
-                    model_name=model_name,
-                )
-
-    for task in long_tasks:
+    for task in tasks:
         span_map[(task.doc_id, task.line_no)] = extract_dual_pass_ner_spans(
-            pipe,
-            task.line_text,
-            min_score=min_score,
-            model_name=model_name,
+            pipe, task.line_text, min_score=min_score, model_name=model_name
         )
 
     for task in tasks:
@@ -1814,7 +1520,6 @@ def _ner_model_worker(
     out_queue: Queue,
     batch_size: int,
 ):
-    """Persistent worker: consumes Q_H / Q_I / Q_X and writes (doc, line, entities) to Q_M."""
     batch: List[LineTask] = []
 
     def flush():
@@ -1876,9 +1581,7 @@ def _store_line_ner_results(
     model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, line_text, non_pii_rules=rules)
 
     all_line_ents = set(
-        (e.category, e.text)
-        for ents in model_line_ents.values()
-        for e in ents
+        (e.category, e.text) for ents in model_line_ents.values() for e in ents
     )
 
     for model_lbl, ents in model_line_ents.items():
@@ -1905,27 +1608,7 @@ def _store_line_ner_results(
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CORPUS-LEVEL NER (batch jobs)
-# ─────────────────────────────────────────────────────────────────────────────
-# run_line_by_line_ner() below is built for interactive document runs: every call
-# spins up one worker thread per model, four queues and a fan-in loop. That cost
-# is amortised over a whole document, but a dataset job calling it once per table
-# cell pays the full setup to infer a single line, over and over.
-# run_corpus_line_ner() is the batch-shaped counterpart: the same models and the
-# same merge semantics as HYBRID_KEY, run straight over every line in the job at
-# once — no threads, no queues, and each distinct line inferred exactly once.
-
-# Lines handed to _infer_line_batch per call. This is bookkeeping only — it sets
-# progress granularity, not how much work a forward pass does.
 NER_CORPUS_BATCH_SIZE = int(os.getenv("NER_CORPUS_BATCH_SIZE", "256"))
-
-# Real tensor batching. Every sequence in a batch pads up to the batch's longest,
-# so the gain does not grow with batch size — past the optimum, padding waste
-# overtakes it. On the PHED export (172k distinct lines, mean 48 chars) the best
-# size tracked the thread count: at 2 threads 8 won every repeat (43 vs 63 ms/line
-# one-at-a-time, with 16 at 52 and 32 at 64), while at 4 threads 16 won. 0 picks a
-# size from that relationship; set an explicit value to pin it, or 1 to batch off.
 NER_TENSOR_BATCH_SIZE = int(os.getenv("NER_TENSOR_BATCH_SIZE", "0"))
 
 
@@ -1934,20 +1617,22 @@ def _tensor_batch_size() -> int:
         return NER_TENSOR_BATCH_SIZE
     return max(8, 4 * _torch.get_num_threads())
 
-# 0 means "leave torch's thread count alone". Raising it is not reliably a win:
-# on a hybrid-core laptop CPU (a few performance cores plus several efficiency
-# cores) spreading one short sequence over every core measured *slower* than the
-# module-level cap of 4, so this is an opt-in knob to tune per machine rather
-# than a default that assumes more cores are better.
+
 NER_TORCH_THREADS = int(os.getenv("NER_TORCH_THREADS", "0"))
 
-# (display label, model id, use_fast, min score) — mirrors run_line_by_line_ner's
-# `pipes` mapping, which is what HYBRID_KEY merges.
+# PREVIOUS DEFAULT THRESHOLDS (Preserved for reuse):
 _HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
     (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.50),
     (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.65),
     (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.50),
 ]
+
+# # NEW THRESHOLDS (Set to 0.0 for now as requested):
+# _HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
+#     (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.0),
+#     (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.0),
+#     (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.0),
+# ]
 
 
 def run_corpus_line_ner(
@@ -1956,7 +1641,6 @@ def run_corpus_line_ner(
     release_models: bool = False,
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> List[List[NerEntity]]:
-    """Hybrid NER over a whole corpus of lines, returning one entity list per line."""
     if not lines:
         return []
     if not _TRANSFORMERS_AVAILABLE:
@@ -1986,7 +1670,6 @@ def _corpus_ner_passes(
     release_models: bool,
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> List[List[NerEntity]]:
-    """One full-corpus pass per model, then merge each line's spans (see caller)."""
     rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     tensor_batch = _tensor_batch_size()
     print(
@@ -2015,14 +1698,6 @@ def _corpus_ner_passes(
                     )
                 spans_per_line[result.line_no].extend(result.spans)
             done += len(chunk)
-            if offset and (offset // batch_size) % 25 == 0:
-                rate = done / max(time.time() - started, 1e-6)
-                remaining = (len(order) - done) / max(rate, 1e-6)
-                print(
-                    f"  [NER] {label}: {done}/{len(order)} lines "
-                    f"({rate:.1f} lines/s, ~{remaining / 60:.1f} min left)",
-                    flush=True,
-                )
 
         print(
             f"  [NER] {label}: {len(order)} lines in {time.time() - started:.1f}s",
@@ -2046,46 +1721,21 @@ def run_line_by_line_ner(
     queue_size: int = NER_QUEUE_MAXSIZE,
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
-    """Load each NER model once, then fan lines out to dedicated worker threads.
-
-    Architecture: Files → Dispatcher → Q_H / Q_I / Q_X → workers → Q_M → merger.
-    Threads share process memory (one model instance per thread). On GPU, inference
-    is locked so CUDA is not used concurrently; on CPU the three models overlap.
-    """
     if not _TRANSFORMERS_AVAILABLE:
-        print(
-            "  [NER] transformers not installed — skipping model inference.",
-            flush=True,
-        )
+        print("  [NER] transformers not installed — skipping model inference.", flush=True)
         return
 
-    print(
-        f"  [NER] Loading HuggingFace models on {_NER_DEVICE_STR} …",
-        flush=True,
-    )
-    hiner_pipe = _load_ner_pipeline(
-        "cfilt/HiNER-original-muril-base-cased", use_fast=False
-    )
+    print(f"  [NER] Loading HuggingFace models on {_NER_DEVICE_STR} …", flush=True)
+    hiner_pipe = _load_ner_pipeline("cfilt/HiNER-original-muril-base-cased", use_fast=False)
     indicner_pipe = _load_ner_pipeline("ai4bharat/IndicNER", use_fast=False)
-    # BERT MODEL (COMMENTED OUT - uncomment to re-enable BERT model)
-    # bert_pipe = (
-    #     _load_ner_pipeline("dslim/bert-base-NER", use_fast=True)
-    #     if include_bert
-    #     else None
-    # )
     bert_pipe = None
-    xlm_pipe = _load_ner_pipeline(
-        "Babelscape/wikineural-multilingual-ner", use_fast=True
-    )
+    xlm_pipe = _load_ner_pipeline("Babelscape/wikineural-multilingual-ner", use_fast=True)
 
     pipes = {
         NER_MODELS["HiNER"][0]: (hiner_pipe, 0.50),
         NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.65),
         NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.50),
     }
-    # BERT MODEL (COMMENTED OUT - uncomment to re-enable BERT model)
-    # if include_bert:
-    #     pipes[NER_MODELS["BERT_Base_NER"][0]] = (bert_pipe, 0.45)
 
     model_labels = list(pipes.keys())
     all_model_labels = [v[0] for v in NER_MODELS.values()]
@@ -2097,7 +1747,6 @@ def run_line_by_line_ner(
     for doc_id, rec in enumerate(records):
         for line_idx, line in enumerate(rec.raw_text.splitlines()):
             original_line = line.strip()
-            # Skip empty lines or trivial noise (< 3 chars) to reduce unnecessary model passes on CPU
             if not original_line or len(original_line) < 3:
                 continue
             line_no = line_idx + 1
@@ -2132,13 +1781,6 @@ def run_line_by_line_ner(
         thread.start()
         workers.append(thread)
 
-    print(
-        f"  [NER] Parallel workers: {len(workers)} models, "
-        f"{len(tasks)} lines, batch={max(1, batch_size)}, "
-        f"device={_NER_DEVICE_STR}",
-        flush=True,
-    )
-
     def dispatch():
         for task in tasks:
             for q in in_queues.values():
@@ -2154,8 +1796,8 @@ def run_line_by_line_ner(
     received = 0
     idle_rounds = 0
     max_idle = int(NER_WORKER_JOIN_TIMEOUT_S / NER_RESULT_GET_TIMEOUT_S) + 1
-
     rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
+
     while workers_done < len(workers) and idle_rounds < max_idle:
         try:
             item = result_queue.get(timeout=NER_RESULT_GET_TIMEOUT_S)
@@ -2171,12 +1813,6 @@ def run_line_by_line_ner(
             continue
 
         received += 1
-        if item.error:
-            print(
-                f"  [NER] Worker error {item.model_name} "
-                f"doc={item.doc_id} line={item.line_no}: {item.error}",
-                flush=True,
-            )
         key = (item.doc_id, item.line_no)
         pending.setdefault(key, {})[item.model_name] = item.spans
         if len(pending[key]) >= expected_per_line:
@@ -2194,19 +1830,10 @@ def run_line_by_line_ner(
     for worker in workers:
         worker.join(timeout=2)
 
-    # Timeout / partial results: merge whatever arrived so a failed worker
-    # cannot leave a document waiting indefinitely.
     for key, model_spans in list(pending.items()):
         doc_id, line_no = key
         if doc_id >= len(records) or key not in line_lookup:
             continue
-        missing = [lbl for lbl in model_labels if lbl not in model_spans]
-        if missing:
-            print(
-                f"  [NER] Incomplete results for {records[doc_id].filename} "
-                f"line {line_no}; missing {missing} (empty spans used).",
-                flush=True,
-            )
         _store_line_ner_results(
             records[doc_id],
             line_no,
@@ -2220,11 +1847,6 @@ def run_line_by_line_ner(
     for rec in records:
         for model_lbl in rec.line_ners:
             rec.line_ners[model_lbl].sort(key=lambda r: r.line_no)
-
-    print(
-        f"  [NER] Fan-in complete: {received}/{total_expected} model-line results.",
-        flush=True,
-    )
 
 
 def scan_records_pii(
@@ -2245,7 +1867,6 @@ def analyze_records(
     queue_size: int = NER_QUEUE_MAXSIZE,
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
-    """Dispatcher overlap: Regex/Presidio PII runs while NER workers consume lines."""
     rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
     pii_errors: List[BaseException] = []
 
@@ -2269,15 +1890,9 @@ def analyze_records(
         raise pii_errors[0]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JSON GENERATOR (MAIN + INDIVIDUAL MODEL JSONs)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 def build_json(records: List[FileRecord], output_path: str):
     base_name, _ = os.path.splitext(output_path)
     main_json_path = base_name + ".json"
-    print(f"\n▶ Writing JSON reports → {base_name}_*.json …", flush=True)
 
     all_models = [
         NER_MODELS["HiNER"][0],
@@ -2295,7 +1910,6 @@ def build_json(records: List[FileRecord], output_path: str):
         HYBRID_KEY: "Hybrid",
     }
 
-    # 1. Combined / Main JSON Report
     main_export = []
     for rec in records:
         file_entry = {
@@ -2347,13 +1961,10 @@ def build_json(records: List[FileRecord], output_path: str):
 
     with open(main_json_path, "w", encoding="utf-8") as f:
         json.dump(main_export, f, indent=2, ensure_ascii=False)
-    print(f"  ✅ Main combined JSON report generated → {main_json_path}", flush=True)
 
-    # 2. Individual JSON File for EACH NER Model
     for model_lbl in all_models:
         slug = model_slugs.get(model_lbl, re.sub(r"\W+", "_", model_lbl))
         model_json_path = f"{base_name}_{slug}.json"
-
         model_export = []
         for rec in records:
             file_entry = {
@@ -2406,12 +2017,8 @@ def build_json(records: List[FileRecord], output_path: str):
 
         with open(model_json_path, "w", encoding="utf-8") as f:
             json.dump(model_export, f, indent=2, ensure_ascii=False)
-        print(f"  ✅ Separate JSON generated for {slug} → {model_json_path}", flush=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EXCEL GENERATOR (4 SHEETS)
-# ─────────────────────────────────────────────────────────────────────────────
 _C = {
     "header_bg": "1F4E79",
     "header_fg": "FFFFFF",
@@ -2451,8 +2058,6 @@ def _auto_width(ws, max_w: int = 55):
 def build_excel(
     records: List[FileRecord], output_path: str, presidio_available: bool
 ):
-    print(f"\n▶ Writing 4-Sheet Excel report → {output_path} …", flush=True)
-
     all_model_labels = [
         NER_MODELS["HiNER"][0],
         NER_MODELS["IndicNER"][0],
@@ -2461,27 +2066,18 @@ def build_excel(
         HYBRID_KEY,
     ]
 
-    # Sheet 1: Summary
     s1_rows = []
     for rec in records:
         all_hits = rec.pii_hits
-        regex_hits = [
-            h for h in all_hits if h.source in ("Regex", "Contextual Regex")
-        ]
+        regex_hits = [h for h in all_hits if h.source in ("Regex", "Contextual Regex")]
         presidio_h = [h for h in all_hits if h.source == "Presidio"]
         tot_pii = len(all_hits)
         pii_types = ", ".join(sorted({h.label for h in all_hits})) or "None"
 
         hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
-        hy_persons = list(
-            dict.fromkeys(p for lres in hybrid_lines for p in lres.persons)
-        )
-        hy_locs = list(
-            dict.fromkeys(l for lres in hybrid_lines for l in lres.locs)
-        )
-        hy_orgs = list(
-            dict.fromkeys(o for lres in hybrid_lines for o in lres.orgs)
-        )
+        hy_persons = list(dict.fromkeys(p for lres in hybrid_lines for p in lres.persons))
+        hy_locs = list(dict.fromkeys(l for lres in hybrid_lines for l in lres.locs))
+        hy_orgs = list(dict.fromkeys(o for lres in hybrid_lines for o in lres.orgs))
 
         s1_rows.append(
             {
@@ -2496,13 +2092,10 @@ def build_excel(
                 "Hybrid NER Locations": " | ".join(hy_locs) or "None",
                 "Hybrid NER Organizations": " | ".join(hy_orgs) or "None",
                 "Has PII": "YES" if tot_pii > 0 else "NO",
-                "Presidio Engine": (
-                    "Active" if presidio_available else "Not Installed"
-                ),
+                "Presidio Engine": "Active" if presidio_available else "Not Installed",
             }
         )
 
-    # Sheet 2: PII Detection
     s2_rows = []
     for rec in records:
         if not rec.pii_hits:
@@ -2528,11 +2121,7 @@ def build_excel(
         else:
             lines = rec.raw_text.splitlines()
             for h in rec.pii_hits:
-                line_text = (
-                    lines[h.line_no - 1]
-                    if 0 < h.line_no <= len(lines)
-                    else rec.raw_text
-                )
+                line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
                 s2_rows.append(
                     {
                         "File": rec.filename,
@@ -2553,7 +2142,6 @@ def build_excel(
                     }
                 )
 
-    # Sheet 3: NER Comparison
     s3_rows = []
     for rec in records:
         line_count = len(rec.line_ners.get(HYBRID_KEY, []))
@@ -2587,9 +2175,7 @@ def build_excel(
                     lres = rec.line_ners[model_lbl][idx]
                     row[f"{model_lbl}_Predicted_Type"] = lres.predicted_type
                     row[f"{model_lbl}_Extracted_Text"] = lres.extracted_text
-                    row[f"{model_lbl}_Missed_Entities"] = (
-                        " | ".join(lres.missed) if lres.missed else "None"
-                    )
+                    row[f"{model_lbl}_Missed_Entities"] = " | ".join(lres.missed) if lres.missed else "None"
                     row[f"{model_lbl}_Status"] = (
                         "✓ Detected"
                         if (lres.persons or lres.locs or lres.orgs)
@@ -2597,17 +2183,12 @@ def build_excel(
                     )
                 s3_rows.append(row)
 
-    # Sheet 4: Anonymization
     s4_rows = []
     for rec in records:
         lines = rec.raw_text.splitlines()
 
         for h in rec.pii_hits:
-            line_text = (
-                lines[h.line_no - 1]
-                if 0 < h.line_no <= len(lines)
-                else rec.raw_text
-            )
+            line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
             s4_rows.append(
                 {
                     "File": rec.filename,
@@ -2644,11 +2225,7 @@ def build_excel(
                 display_label = (
                     "Person Name"
                     if ent.category == "PERSON"
-                    else (
-                        "Location / City"
-                        if ent.category == "LOCATION"
-                        else "Organization"
-                    )
+                    else ("Location / City" if ent.category == "LOCATION" else "Organization")
                 )
 
                 s4_rows.append(
@@ -2677,27 +2254,14 @@ def build_excel(
         os.makedirs(output_dir, exist_ok=True)
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        pd.DataFrame(s1_rows).to_excel(
-            writer, sheet_name="Summary", index=False
-        )
-        pd.DataFrame(s2_rows).to_excel(
-            writer, sheet_name="PII Detection", index=False
-        )
-        pd.DataFrame(s3_rows).to_excel(
-            writer, sheet_name="NER Comparison", index=False
-        )
-        pd.DataFrame(s4_rows).to_excel(
-            writer, sheet_name="Anonymization", index=False
-        )
+        pd.DataFrame(s1_rows).to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(s2_rows).to_excel(writer, sheet_name="PII Detection", index=False)
+        pd.DataFrame(s3_rows).to_excel(writer, sheet_name="NER Comparison", index=False)
+        pd.DataFrame(s4_rows).to_excel(writer, sheet_name="Anonymization", index=False)
 
     wb = openpyxl.load_workbook(output_path)
 
-    for sheet_name in [
-        "Summary",
-        "PII Detection",
-        "NER Comparison",
-        "Anonymization",
-    ]:
+    for sheet_name in ["Summary", "PII Detection", "NER Comparison", "Anonymization"]:
         ws = wb[sheet_name]
         _style_header(ws)
         for row in ws.iter_rows(min_row=2):
@@ -2723,31 +2287,23 @@ def build_excel(
         _auto_width(ws)
 
     wb.save(output_path)
-    print(
-        f"  ✅ Excel report generated successfully → {output_path}", flush=True
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INLINE STRING INPUT SUPPORT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def process_text_string(
-    text: str,
+    text: Union[str, List[str], Tuple[str, ...]],
     output_path: str = DEFAULT_OUTPUT_PATH,
     label: str = "inline_input",
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
     custom_non_pii_list: Optional[List[Any]] = None,
 ) -> List[FileRecord]:
+    if isinstance(text, (list, tuple)):
+        text = "\n".join(str(item) for item in text)
     text = text.replace("\\n", "\n").replace("\\t", "\t")
     text = text.strip("'\"")
 
     if not text.strip():
-        print(
-            "[WARN] --text input is empty; nothing to process.", flush=True
-        )
+        print("[WARN] --text input is empty; nothing to process.", flush=True)
         return []
 
     rules = prepare_non_pii_rules(custom_non_pii_list)
@@ -2771,11 +2327,6 @@ def process_text_string(
     build_json([rec], output_path)
 
     return [rec]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def parse_args():
@@ -2848,8 +2399,8 @@ def main():
     args = parse_args()
 
     if args.config is not None:
-        from batch_pipeline import run as run_batch
-        from batch_pipeline import BatchError
+        from grievance_anonymization.batch_pipeline import run as run_batch
+        from grievance_anonymization.batch_pipeline import BatchError
 
         try:
             run_batch(args.config)
@@ -2881,18 +2432,7 @@ def main():
             custom_non_pii.extend(item.strip() for item in args.non_pii_list.split(",") if item.strip())
 
     rules = prepare_non_pii_rules(custom_non_pii)
-
-    # Presidio check (COMMENTED OUT - Presidio disabled)
-    # presidio_ok = _PRESIDIO_AVAILABLE and (_get_presidio_engine() is not None)
-    # print(
-    #     f"[Pipeline] Presidio:         {'✓ Active' if presidio_ok else '✗ Not available'}",
-    #     flush=True,
-    # )
     presidio_ok = False
-    print(
-        f"[Pipeline] NER Transformers: {'✓ Available on ' + _NER_DEVICE_STR if _TRANSFORMERS_AVAILABLE else '✗ Not installed'}",
-        flush=True,
-    )
 
     if args.text is not None:
         if args.input is not None:
@@ -2935,10 +2475,6 @@ def main():
     if not records:
         sys.exit("[ERROR] No readable documents found after extraction.")
 
-    print(
-        f"[Pipeline] Documents: {len(records)} | Parallel NER workers + overlapping PII scan",
-        flush=True,
-    )
     analyze_records(
         records,
         batch_size=max(1, args.ner_batch_size),

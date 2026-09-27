@@ -1,0 +1,3 @@
+complaint_id,filed_on,complainant,age,address,phone,email,aadhaar,pan,narrative
+GRV-2024-2001,15-04-2024,Dr. Ananya Iyer,38,"12 MG Road, Bengaluru, Karnataka - 560001",9988776655,ananya.iyer@example.com,4567 8901 2345,PQRST9012U,"Dr. Ananya Iyer of Bengaluru states that Mr. Vikram Singh at City Hospital withheld her medical UHID MH-778899. Her debit card 4111 1111 1111 4321 was charged without consent."
+GRV-2024-2002,04-02-2013,Sri P. Muthyalu,46,"Santosh Nagar, Hyderabad, Telangana - 500059",9000011122,p.muthyalu@example.com,5678 9012 3456,LMNOP3456Q,"Sri P.MUTHYALU, S/o LAXMAIAH, Hyderabad, reports a dispute over Sale Deed Document No.4363 of 2013 involving Smt. MANTHENA RAJYYAMMA, W/o Late M.SIVARAMA RAJU, Plot No.303, Vivekananda Nagar Colony, Kukatpally."

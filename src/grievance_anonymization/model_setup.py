@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  SETUP.PY — Dependency Installer for PII / NER Pipeline                     ║
+# ║  MODEL_SETUP.PY — Dependency Installer for PII / NER Pipeline               ║
 # ║                                                                              ║
 # ║  Run once before running the pipeline:                                       ║
-# ║      python app/model_setup.py                                               ║
+# ║      python -m grievance_anonymization.model_setup                           ║
 # ║                                                                              ║
 # ║  Models downloaded to HuggingFace cache (~/.cache/huggingface/hub/):         ║
 # ║    • cfilt/HiNER-original-muril-base-cased   (~900 MB)                         ║
 # ║    • ai4bharat/IndicNER                       (~900 MB)                         ║
 # ║    • Babelscape/wikineural-multilingual-ner   (~1.1 GB)                         ║
-# ║    • spaCy en_core_web_lg                      (~788 MB)                         ║
 # ║  Total disk needed: ~4.0 GB + pipeline dependencies                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -17,9 +16,6 @@ import subprocess
 import sys
 import os
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HuggingFace token (needed for gated models; set in Kaggle Secrets)
-# ─────────────────────────────────────────────────────────────────────────────
 os.environ["HF_TOKEN"]               = os.getenv("HF_TOKEN", "").strip()
 os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
 
@@ -28,7 +24,6 @@ if HF_TOKEN:
     os.environ["HF_TOKEN"]                 = HF_TOKEN
     os.environ["HUGGING_FACE_HUB_TOKEN"]  = HF_TOKEN
 else:
-    # Clear empty token env vars to prevent sending empty Authorization headers
     os.environ.pop("HF_TOKEN", None)
     os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
 
@@ -45,7 +40,6 @@ def run(*args, check=True, **kwargs):
 
 
 def pip_install(*packages, extra_args=None):
-    # Removed global --upgrade to prevent breaking pre-installed environment dependencies
     cmd = [sys.executable, "-m", "pip", "install", "-q"]
     if extra_args:
         cmd.extend(extra_args)
@@ -53,10 +47,6 @@ def pip_install(*packages, extra_args=None):
     run(*cmd)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NER MODELS TO DOWNLOAD
-# ─────────────────────────────────────────────────────────────────────────────
-# Each entry: (model_id, description, size_note)
 NER_MODEL_IDS = [
     (
         "cfilt/HiNER-original-muril-base-cased",
@@ -77,30 +67,17 @@ NER_MODEL_IDS = [
 
 
 def prefetch_models(max_workers: int = 3) -> int:
-    """Download every runtime NER model into the HuggingFace cache, in parallel.
-
-    Downloading is network-bound, so fetching the models concurrently costs about
-    as long as the slowest one instead of the sum. (hf_transfer already
-    parallelises chunks *within* one file; this parallelises across files.)
-
-    This runs at image build time. At run time the pipeline reads the cache and
-    fetches nothing, so this does not change how long an anonymization job takes
-    — it only shortens the build.
-
-    The (model, use_fast) pairs come from main._HYBRID_NER_SPECS so the build
-    caches exactly the tokenizer variant the pipeline asks for later. That
-    matters: caching a tokenizer as slow when the pipeline loads it fast is a
-    cache miss, and inside an offline TEE a cache miss is a failure, not a
-    download.
-
-    Returns the number of models that failed, so the caller decides what is
-    fatal. A gated repo without a token (IndicNER) is reported, not raised.
-    """
+    """Download every runtime NER model into the HuggingFace cache, in parallel."""
     from concurrent.futures import ThreadPoolExecutor
     from transformers import AutoTokenizer, AutoModelForTokenClassification
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from main import _HYBRID_NER_SPECS
+    try:
+        from grievance_anonymization.main import _HYBRID_NER_SPECS
+    except ImportError:
+        try:
+            from main import _HYBRID_NER_SPECS
+        except ImportError:
+            from .main import _HYBRID_NER_SPECS
 
     token = os.getenv("HF_TOKEN", "").strip() or None
 
@@ -120,10 +97,10 @@ def prefetch_models(max_workers: int = 3) -> int:
     failed = 0
     for model_id, exc in results:
         if exc is None:
-            print(f"  \u2713 cached {model_id}")
+            print(f"  ✓ cached {model_id}")
         else:
             failed += 1
-            print(f"  \u2717 {model_id}: {exc}")
+            print(f"  ✗ {model_id}: {exc}")
     if failed:
         print(
             f"\n  {failed} model(s) not cached; they will be skipped at runtime. "
@@ -132,11 +109,8 @@ def prefetch_models(max_workers: int = 3) -> int:
     return failed
 
 
-
 def main():
     if "--prefetch" in sys.argv:
-        # Build-time entry point: dependencies are already installed, so go
-        # straight to populating the model cache.
         failed = prefetch_models()
         raise SystemExit(1 if failed and "--strict" in sys.argv else 0)
 
@@ -144,11 +118,9 @@ def main():
     print("  PII / NER Pipeline — Dependency Setup")
     print("═" * 72)
 
-    # ── 1. Base Toolchain ─────────────────────────────────────────────────
     print("\n[1] Upgrading pip / setuptools / wheel …")
     pip_install("pip", "setuptools", "wheel", extra_args=["--upgrade"])
 
-    # ── 2. PyTorch ────────────────────────────────────────────────────────
     print("\n[2] Installing PyTorch …")
     try:
         import torch as _t
@@ -172,47 +144,27 @@ def main():
                 extra_args=["--index-url", "https://download.pytorch.org/whl/cpu"],
             )
 
-    # ── 3. Transformers Stack ─────────────────────────────────────────────
     print("\n[3] Installing Transformers + HuggingFace stack …")
     pip_install(
         "transformers>=4.40.0",
         "huggingface_hub>=0.22.0",
         "accelerate>=0.26",
-        "sentencepiece",        # required by MuRIL tokenizer (HiNER)
-        "protobuf<6.0.0,>=3.20.2", # pinned to avoid breaking google-cloud / grpc dependencies
+        "sentencepiece",
+        "protobuf<6.0.0,>=3.20.2",
     )
 
-    # ── 4. spaCy (for Presidio) ───────────────────────────────────────────
-    # (COMMENTED OUT as requested - uncomment to install spaCy and download en_core_web_lg)
-    # print("\n[4] Installing spaCy and downloading en_core_web_lg …")
-    # pip_install("spacy>=3.7.0")
-    # run(sys.executable, "-m", "spacy", "download", "en_core_web_lg", "--quiet")
-
-    # ── 5. Presidio ───────────────────────────────────────────────────────
-    # (COMMENTED OUT as requested - uncomment to install Presidio Analyzer + Anonymizer)
-    # print("\n[5] Installing Presidio Analyzer + Anonymizer …")
-    # pip_install("presidio-analyzer", "presidio-anonymizer")
-
-    # ── 6. Document reading libs ──────────────────────────────────────────
-    print("\n[6] Installing python-docx and BeautifulSoup4 …")
+    print("\n[4] Installing python-docx and BeautifulSoup4 …")
     pip_install("python-docx", "beautifulsoup4", "lxml")
 
-    # ── 7. Utilities ──────────────────────────────────────────────────────
-    print("\n[7] Installing utilities: Pandas, OpenPyXL, tqdm …")
+    print("\n[5] Installing utilities: Pandas, OpenPyXL, tqdm …")
     pip_install(
-        "pandas>=2.0.0,<3.0.0", # pinned to <3.0.0 to prevent google-colab & gradio conflicts
+        "pandas>=2.0.0,<3.0.0",
         "openpyxl>=3.1.0",
         "tqdm",
         "colorama",
     )
 
-    # ── 8. Download all 3 multilingual NER models ─────────────────────────
-    # WHY we download here and not in pipeline.py:
-    #   • Kaggle kernels have no internet access during inference by default.
-    #   • Downloading in model_setup.py populates ~/.cache/huggingface/hub/ once.
-    #   • pipeline.py then loads from cache (offline, fast).
-    #   • Each model is ~430 MB – 1.1 GB; downloading once saves runtime.
-    print("\n[8] Pre-downloading NER models to HuggingFace cache …")
+    print("\n[6] Pre-downloading NER models to HuggingFace cache …")
     print("  (Models saved to: ~/.cache/huggingface/hub/)")
     print("  NOTE: This requires ~4.0 GB disk and internet access.\n")
 
@@ -227,35 +179,29 @@ def main():
         print(f"  Model ID:    {model_id}")
         print(f"  Size:        {size}")
         try:
-            # Handle token parameter cleanly to prevent invalid authentication requests
             hf_kwargs = {}
             if HF_TOKEN:
                 hf_kwargs["token"] = HF_TOKEN
 
-            # Download tokenizer
             tok = AutoTokenizer.from_pretrained(
                 model_id,
-                # HiNER/IndicNER use sentencepiece — set use_fast=False as fallback
                 use_fast=False if "muril" in model_id.lower() or "indic" in model_id.lower() else True,
                 **hf_kwargs
             )
-            # Download model weights
             mdl = AutoModelForTokenClassification.from_pretrained(
                 model_id,
                 **hf_kwargs
             )
-            del tok, mdl          # free RAM; weights stay in disk cache
+            del tok, mdl
             import gc; gc.collect()
             print(f"  ✓ Downloaded and cached: {model_id}")
         except Exception as e:
             print(f"  ✗ Download failed for {model_id}: {e}")
-            print("    → Check your internet connection and HF_TOKEN if the model is gated.")
 
-    # ── Summary ───────────────────────────────────────────────────────────
     print("\n" + "═" * 72)
     print("  ✅ Setup complete.")
     print("  Cache location: ~/.cache/huggingface/hub/")
-    print("  Next step:      python pipeline.py --input <folder_or_file>")
+    print("  Next step:      python -m grievance_anonymization.main --input <folder_or_file>")
     print("═" * 72 + "\n")
 
 

@@ -1,21 +1,19 @@
+version: '3.8'
+
 services:
-  anonymizer:
+  grievance-anonymizer:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: grievance_anonymizer
+    image: datakaveri/grievance-data-anonymization:latest
+    container_name: grievance-anonymizer
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
+      - NER_CORPUS_BATCH_SIZE=256
+      - NER_TENSOR_BATCH_SIZE=0
     volumes:
-      - ./config:/app/config:ro
+      - ./config:/app/config
       - ./data:/app/data
-      - ./work:/app/work
       - ./output:/app/output
-    # Enable NVIDIA GPU support if docker container toolkit is available:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+      - ./work:/app/work
+    restart: "no"

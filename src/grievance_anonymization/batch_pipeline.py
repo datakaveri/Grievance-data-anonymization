@@ -16,7 +16,7 @@ from typing import Any
 import pandas as pd
 
 try:
-    from main import (
+    from grievance_anonymization.main import (
         NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
@@ -25,16 +25,27 @@ try:
         run_corpus_line_ner,
         _TRANSFORMERS_AVAILABLE,
     )
-except ModuleNotFoundError:  # Supports `python -m app.batch_pipeline` too.
-    from .main import (
-        NER_CORPUS_BATCH_SIZE,
-        PiiHit,
-        detect_language,
-        full_pii_scan,
-        merge_pii_hits,
-        run_corpus_line_ner,
-        _TRANSFORMERS_AVAILABLE,
-    )
+except ModuleNotFoundError:
+    try:
+        from main import (
+            NER_CORPUS_BATCH_SIZE,
+            PiiHit,
+            detect_language,
+            full_pii_scan,
+            merge_pii_hits,
+            run_corpus_line_ner,
+            _TRANSFORMERS_AVAILABLE,
+        )
+    except ModuleNotFoundError:
+        from .main import (
+            NER_CORPUS_BATCH_SIZE,
+            PiiHit,
+            detect_language,
+            full_pii_scan,
+            merge_pii_hits,
+            run_corpus_line_ner,
+            _TRANSFORMERS_AVAILABLE,
+        )
 
 REDACTED = "*"
 
@@ -117,7 +128,6 @@ def _read_table(path: Path) -> tuple[pd.DataFrame, str]:
             if isinstance(payload, list):
                 return pd.DataFrame(payload), "json"
             if isinstance(payload, dict):
-                # Accept either a records container or a column-oriented object.
                 records = payload.get("records", payload.get("data"))
                 if isinstance(records, list):
                     return pd.DataFrame(records), "json"
@@ -131,14 +141,6 @@ _SUPPORTED_SOURCE_EXTS = {".csv", ".json", ".xls", ".xlsx"}
 
 
 def _resolve_source_input(dataset: dict[str, Any], work_root: Path) -> Path:
-    """Locate the raw dataset to anonymize.
-
-    `source_input_path` is an optional convenience for local/manual runs. The
-    config shared with SKALD downstream has no such key — SKALD locates its
-    input by scanning `data/` for exactly one file (its `list_non_empty_csvs`),
-    so when the key is absent we mirror that same convention against the same
-    mounted `data/` directory instead of requiring a path in config.
-    """
     configured = dataset.get("source_input_path")
     if configured:
         return _path(configured, work_root)
@@ -162,7 +164,6 @@ def _resolve_source_input(dataset: dict[str, Any], work_root: Path) -> Path:
 
 def _write_table(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Write beside the destination and replace it only after the whole batch succeeds.
     with tempfile.NamedTemporaryFile(dir=path.parent, suffix=path.suffix, delete=False) as tmp:
         temporary = Path(tmp.name)
     try:
@@ -178,11 +179,6 @@ def _cell_hits(text: str) -> list[PiiHit]:
 
 
 def _line_bases(text: str) -> list[int]:
-    """Cell-relative offset of each line's first non-whitespace character.
-
-    Detection runs on line.strip(), so a hit's offsets are relative to the
-    stripped line; adding the base restores the cell-relative position.
-    """
     bases: list[int] = []
     cursor = 0
     for line in text.splitlines(keepends=True):
@@ -192,7 +188,6 @@ def _line_bases(text: str) -> list[int]:
 
 
 def _absolute_hits(text: str) -> list[tuple[int, int, PiiHit]]:
-    """Convert line-relative hit offsets into cell-relative zero-based offsets."""
     bases = _line_bases(text)
     result = []
     for hit in _cell_hits(text):
@@ -204,7 +199,6 @@ def _absolute_hits(text: str) -> list[tuple[int, int, PiiHit]]:
 
 
 def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]) -> tuple[str, str]:
-    """Return (replacement, technique) for the legacy hardcoded policy map."""
     normalized = label.upper().replace(" ", "_")
     original = value
     value = value.strip()
@@ -238,21 +232,14 @@ def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]
         return (digits[:3] + "XXX" if len(digits) >= 6 else REDACTED, "partial_mask")
     if any(term in normalized for term in ("PERSON", "NAME", "LOCATION", "LOC", "ORGANIZATION", "ORG")):
         return REDACTED, "suppress"
-    # Everything else (Voter ID, Passport, Driving License, Vehicle Number, IFSC,
-    # User ID, PPP ID, IP address, Patient ID / UHID, ...) is hashed the same way
-    # SKALD's `hashing_with_salt` does it: SHA256(salt + value), one random salt
-    # per column generated once for this run and reused for every row in it.
     salt = salts.setdefault(column, secrets.token_hex(32))
     return hashlib.sha256((salt + value).encode()).hexdigest(), "salted_hash"
 
 
-# run_line_by_line_ner's dispatcher drops blank and sub-3-char lines rather than
-# paying a model pass for them; the corpus builder below mirrors that.
 _MIN_NER_LINE_CHARS = 3
 
 
 def _ner_lines(text: str) -> list[tuple[int, str]]:
-    """(line index, stripped line) for the lines worth sending to the models."""
     result = []
     for line_idx, line in enumerate(text.splitlines()):
         stripped = line.strip()
@@ -262,17 +249,6 @@ def _ner_lines(text: str) -> list[tuple[int, str]]:
 
 
 def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[str, Any]]]:
-    """Run hybrid NER once over every distinct line in the job.
-
-    This used to run per cell: each call re-orchestrated the model worker threads
-    and queues to infer a single short line, so the mini-batching never engaged and
-    a phrase repeated across thousands of rows was embedded thousands of times.
-    Here every distinct line in the corpus is inferred exactly once, in real
-    mini-batches, and the resulting spans are projected back onto each text that
-    contains that line.
-
-    Returns {text: [hit dicts with cell-relative offsets]}.
-    """
     line_ids: dict[str, int] = {}
     corpus: list[str] = []
     for text in texts:
@@ -328,7 +304,6 @@ def _sanitize(
     if not hits:
         return text, []
 
-    # Apply right-to-left so offsets remain valid. Overlapping detections are one replacement.
     spans: list[tuple[int, int, list[dict[str, Any]]]] = []
     for hit in hits:
         start, end = hit["start"], hit["end"]
@@ -340,7 +315,6 @@ def _sanitize(
     output = text
     audit: list[dict[str, Any]] = []
     for start, end, span_hits in reversed(spans):
-        # Use the first detection's hardcoded policy for an overlapping span.
         replacement, technique = _hardcoded_policy(span_hits[0]["label"], text[start:end], column, salts)
         output = output[:start] + replacement + output[end:]
         for hit in span_hits:
@@ -360,7 +334,6 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     config_arg = Path(config_path).resolve()
     config_file = _resolve_config_file(config_arg)
     config_dir = config_arg if config_arg.is_dir() else config_file.parent
-    # In the container, config/ and data/... are siblings under /app.
     work_root = Path(root).resolve() if root else config_dir.parent
     dataset = _load_config(config_file)
     source = _resolve_source_input(dataset, work_root)
@@ -375,7 +348,7 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     if not _TRANSFORMERS_AVAILABLE:
         raise BatchError(
             "NER dependencies are not installed. Run 'pip install -r requirements.txt' "
-            "or 'python app/model_setup.py' before running the multilingual batch job."
+            "or 'python -m grievance_anonymization.model_setup' before running the multilingual batch job."
         )
 
     columns = settings.get("columns")
@@ -392,16 +365,10 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     batch_size = int(settings.get("ner_batch_size", NER_CORPUS_BATCH_SIZE))
     audit: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    # One random salt per column, generated once for this run (mirrors SKALD's hashing_with_salt).
     column_hash_salts: dict[str, str] = {}
     column_locs = {column: df.columns.get_loc(column) for column in columns}
     started = time.time()
 
-    # Pass 1 — collect the distinct values we actually have to anonymize.
-    # Grievance free text repeats heavily (four in five complaint bodies in a real
-    # PHED export are duplicates), and the sanitized form of a value depends only
-    # on (value, column), so each distinct pair is computed once however many rows
-    # carry it.
     distinct: set[str] = set()
     for column in columns:
         for value in df.iloc[:, column_locs[column]].tolist():
@@ -413,7 +380,6 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
         flush=True,
     )
 
-    # Pass 2 — one NER sweep over the whole corpus, then apply the policy.
     ner_index = _build_ner_index(texts, batch_size) if texts else {}
     sanitized_cache: dict[tuple[str, str], tuple[str, list[dict[str, Any]]]] = {}
     for column in columns:
@@ -442,8 +408,7 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
                 if on_failure == "fail":
                     raise BatchError(f"Anonymization failed at row {row_index + 1}, column {column!r}: {exc}") from exc
         df.isetitem(loc, values)
-    # Pass 2 walks column-major for cheap bulk column reads; the audit is still
-    # emitted row-major, in configured column order, as consumers expect.
+
     column_order = {column: rank for rank, column in enumerate(columns)}
     audit.sort(key=lambda item: (item["row"], column_order[item["column"]]))
     failures.sort(key=lambda item: (item["row"], column_order[item["column"]]))

@@ -38,16 +38,15 @@ chandra_venv/
 *.pem
 *.key
 
-# Application Data & Outputs
-data/source_images/*
-!data/source_images/.gitkeep
+# Temporary files & legacy folders
+verification_results.txt
+required_layout_rule.txt
+work/
+app/
+
+# Application Outputs & Generated Files
 output/
 *.xlsx
-*.csv
-_chandra_tmp/
-_chandra_manifest/
-
-# Logs
 *.log
 
 # IDEs and Editors
@@ -59,5 +58,4 @@ _chandra_manifest/
 # Docker / System artifacts
 .DS_Store
 .antigravity/
-
 .claude/
