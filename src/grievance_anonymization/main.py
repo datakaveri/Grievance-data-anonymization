@@ -68,8 +68,22 @@ except ImportError:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_INPUT_PATH = str(PROJECT_ROOT / "data" / "sample_complaint.txt")
-DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
+DEFAULT_OUTPUT_PATH = str(PROJECT_ROOT / "output" / "pii_ner_report.xlsx")
 DEFAULT_HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+
+
+def resolve_output_path(output_path: str) -> str:
+    """
+    Ensures that output files are saved in the 'output' directory.
+    If a bare filename or relative path is provided, redirects to output/ folder.
+    """
+    if not output_path:
+        return str(PROJECT_ROOT / "output" / "pii_ner_report.xlsx")
+    p = Path(output_path)
+    if not p.is_absolute() and (len(p.parts) == 1 or p.parts[0] != "output"):
+        return str(PROJECT_ROOT / "output" / p.name)
+    return str(p)
+
 
 
 def truecase_line(text: str) -> str:
@@ -1115,6 +1129,7 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
     if not _TRANSFORMERS_AVAILABLE:
         return None
     try:
+        print(f"  [NER] Loading HuggingFace model weights for '{model_id}'...", flush=True)
         hf_token = os.getenv("HF_TOKEN") or None
         tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, use_fast=use_fast)
         model = AutoModelForTokenClassification.from_pretrained(model_id, token=hf_token)
@@ -1128,9 +1143,10 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
             device=_NER_DEVICE,
         )
         _NER_PIPELINE_CACHE[model_id] = ner_pipe
+        print(f"  ✓ Successfully loaded model weights for '{model_id}'", flush=True)
         return ner_pipe
     except Exception as exc:
-        print(f"  [NER] Could not load {model_id}: {exc}", flush=True)
+        print(f"  [NER] Could not load model '{model_id}': {exc}", flush=True)
         _NER_PIPELINE_CACHE[model_id] = None
         return None
 
@@ -1854,10 +1870,19 @@ def scan_records_pii(
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
     rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
+    print(f"\n[PII] Running Regex & Presidio PII scan on {len(records)} document(s)...", flush=True)
+    total_pii = 0
     for rec in records:
         regex_hits, presidio_hits = full_pii_scan(rec.raw_text)
         merged = merge_pii_hits(regex_hits, presidio_hits)
         rec.pii_hits = filter_non_pii_hits(merged, rules)
+        total_pii += len(rec.pii_hits)
+        print(
+            f"  ➜ Document '{rec.filename}': Found {len(rec.pii_hits)} PII hit(s).",
+            flush=True,
+        )
+    print(f"✓ PII scanning complete. Total PII hits: {total_pii}", flush=True)
+
 
 
 def analyze_records(
@@ -1891,13 +1916,18 @@ def analyze_records(
 
 
 def build_json(records: List[FileRecord], output_path: str):
+    output_path = resolve_output_path(output_path)
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     base_name, _ = os.path.splitext(output_path)
     main_json_path = base_name + ".json"
 
-    all_models = [
+    # NOTE: BERT_Base_NER is excluded from per-model json outputs as requested
+    models_to_export = [
         NER_MODELS["HiNER"][0],
         NER_MODELS["IndicNER"][0],
-        NER_MODELS["BERT_Base_NER"][0],
         NER_MODELS["XLM_RoBERTa"][0],
         HYBRID_KEY,
     ]
@@ -1905,7 +1935,6 @@ def build_json(records: List[FileRecord], output_path: str):
     model_slugs = {
         NER_MODELS["HiNER"][0]: "HiNER",
         NER_MODELS["IndicNER"][0]: "IndicNER",
-        NER_MODELS["BERT_Base_NER"][0]: "BERT_Base_NER",
         NER_MODELS["XLM_RoBERTa"][0]: "XLM_RoBERTa",
         HYBRID_KEY: "Hybrid",
     }
@@ -1962,7 +1991,7 @@ def build_json(records: List[FileRecord], output_path: str):
     with open(main_json_path, "w", encoding="utf-8") as f:
         json.dump(main_export, f, indent=2, ensure_ascii=False)
 
-    for model_lbl in all_models:
+    for model_lbl in models_to_export:
         slug = model_slugs.get(model_lbl, re.sub(r"\W+", "_", model_lbl))
         model_json_path = f"{base_name}_{slug}.json"
         model_export = []
@@ -2018,6 +2047,227 @@ def build_json(records: List[FileRecord], output_path: str):
         with open(model_json_path, "w", encoding="utf-8") as f:
             json.dump(model_export, f, indent=2, ensure_ascii=False)
 
+    print(f"  ✓ Saved JSON reports in output folder: {output_dir}", flush=True)
+    print(f"    • Main JSON: {main_json_path}", flush=True)
+
+
+def build_csv(
+    records: List[FileRecord], output_path: str, presidio_available: bool = False
+):
+    output_path = resolve_output_path(output_path)
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+    base_name, _ = os.path.splitext(output_path)
+
+    all_model_labels = [
+        NER_MODELS["HiNER"][0],
+        NER_MODELS["IndicNER"][0],
+        NER_MODELS["BERT_Base_NER"][0],
+        NER_MODELS["XLM_RoBERTa"][0],
+        HYBRID_KEY,
+    ]
+
+    s1_rows = []
+    for rec in records:
+        all_hits = rec.pii_hits
+        regex_hits = [h for h in all_hits if h.source in ("Regex", "Contextual Regex")]
+        presidio_h = [h for h in all_hits if h.source == "Presidio"]
+        tot_pii = len(all_hits)
+        pii_types = ", ".join(sorted({h.label for h in all_hits})) or "None"
+
+        hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
+        hy_persons = list(dict.fromkeys(p for lres in hybrid_lines for p in lres.persons))
+        hy_locs = list(dict.fromkeys(l for lres in hybrid_lines for l in lres.locs))
+        hy_orgs = list(dict.fromkeys(o for lres in hybrid_lines for o in lres.orgs))
+
+        s1_rows.append(
+            {
+                "File": rec.filename,
+                "File Type": rec.file_type.upper(),
+                "Language": rec.language,
+                "Total PII Entities": tot_pii,
+                "Regex PII Hits": len(regex_hits),
+                "Presidio PII Hits": len(presidio_h),
+                "PII Types Found": pii_types,
+                "Hybrid NER Persons": " | ".join(hy_persons) or "None",
+                "Hybrid NER Locations": " | ".join(hy_locs) or "None",
+                "Hybrid NER Organizations": " | ".join(hy_orgs) or "None",
+                "Has PII": "YES" if tot_pii > 0 else "NO",
+                "Presidio Engine": "Active" if presidio_available else "Not Installed",
+            }
+        )
+
+    s2_rows = []
+    for rec in records:
+        if not rec.pii_hits:
+            s2_rows.append(
+                {
+                    "File": rec.filename,
+                    "File Type": rec.file_type.upper(),
+                    "Language": rec.language,
+                    "Line No": "-",
+                    "Word No": "-",
+                    "Word Position": "-",
+                    "Start Letter": "-",
+                    "End Letter": "-",
+                    "Letter Span": "-",
+                    "Extracted Text": rec.raw_text,
+                    "PII Type": "None",
+                    "PII Display Name": "None",
+                    "Detected Value": "None Detected",
+                    "Detected By": "None",
+                    "PII Tag": "—",
+                }
+            )
+        else:
+            lines = rec.raw_text.splitlines()
+            for h in rec.pii_hits:
+                line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+                s2_rows.append(
+                    {
+                        "File": rec.filename,
+                        "File Type": rec.file_type.upper(),
+                        "Language": rec.language,
+                        "Line No": h.line_no,
+                        "Word No": h.word_no,
+                        "Word Position": ordinal(h.word_no),
+                        "Start Letter": h.start_char,
+                        "End Letter": h.end_char,
+                        "Letter Span": f"{h.start_char}-{h.end_char}",
+                        "Extracted Text": line_text,
+                        "PII Type": h.label,
+                        "PII Display Name": h.display,
+                        "Detected Value": h.value,
+                        "Detected By": h.source,
+                        "PII Tag": f"<{h.label}>{h.value}</{h.label}>",
+                    }
+                )
+
+    s3_rows = []
+    for rec in records:
+        line_count = len(rec.line_ners.get(HYBRID_KEY, []))
+        if line_count == 0:
+            row = {
+                "File": rec.filename,
+                "File Type": rec.file_type.upper(),
+                "Language": rec.language,
+                "Line No": 1,
+                "Input_Text": rec.raw_text,
+                "Has_Context": len(rec.raw_text.split()) > 2,
+            }
+            for model_lbl in all_model_labels:
+                row[f"{model_lbl}_Predicted_Type"] = "NONE"
+                row[f"{model_lbl}_Extracted_Text"] = "None"
+                row[f"{model_lbl}_Missed_Entities"] = "None"
+                row[f"{model_lbl}_Status"] = "✗ None Detected"
+            s3_rows.append(row)
+        else:
+            for idx in range(line_count):
+                sample_lres = rec.line_ners[HYBRID_KEY][idx]
+                row = {
+                    "File": rec.filename,
+                    "File Type": rec.file_type.upper(),
+                    "Language": rec.language,
+                    "Line No": sample_lres.line_no,
+                    "Input_Text": sample_lres.text,
+                    "Has_Context": len(sample_lres.text.split()) > 2,
+                }
+                for model_lbl in all_model_labels:
+                    lres = rec.line_ners[model_lbl][idx]
+                    row[f"{model_lbl}_Predicted_Type"] = lres.predicted_type
+                    row[f"{model_lbl}_Extracted_Text"] = lres.extracted_text
+                    row[f"{model_lbl}_Missed_Entities"] = " | ".join(lres.missed) if lres.missed else "None"
+                    row[f"{model_lbl}_Status"] = (
+                        "✓ Detected"
+                        if (lres.persons or lres.locs or lres.orgs)
+                        else "✗ None Detected"
+                    )
+                s3_rows.append(row)
+
+    s4_rows = []
+    for rec in records:
+        lines = rec.raw_text.splitlines()
+
+        for h in rec.pii_hits:
+            line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+            s4_rows.append(
+                {
+                    "File": rec.filename,
+                    "File Type": rec.file_type.upper(),
+                    "Language": rec.language,
+                    "Line No": h.line_no,
+                    "Word No": h.word_no,
+                    "Word Position": ordinal(h.word_no),
+                    "Start Letter": h.start_char,
+                    "End Letter": h.end_char,
+                    "Letter Span": f"{h.start_char}-{h.end_char}",
+                    "Extracted Text": line_text,
+                    "Source Type": "PII",
+                    "Detection Engine": h.source,
+                    "Entity / PII Type": h.display,
+                    "Original Value": h.value,
+                    "Confidence Score": "1.00 (Exact Regex/Presidio)",
+                    "PII / NER Tag": f"<{h.label}>{h.value}</{h.label}>",
+                }
+            )
+
+        hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
+        anon_seen: set = set()
+
+        for lres in hybrid_lines:
+            line_text = lres.text
+
+            for ent in lres.entities:
+                key = (lres.line_no, ent.category, ent.text.lower())
+                if key in anon_seen:
+                    continue
+                anon_seen.add(key)
+
+                display_label = (
+                    "Person Name"
+                    if ent.category == "PERSON"
+                    else ("Location / City" if ent.category == "LOCATION" else "Organization")
+                )
+
+                s4_rows.append(
+                    {
+                        "File": rec.filename,
+                        "File Type": rec.file_type.upper(),
+                        "Language": rec.language,
+                        "Line No": lres.line_no,
+                        "Word No": ent.word_no,
+                        "Word Position": ordinal(ent.word_no),
+                        "Start Letter": ent.start_char,
+                        "End Letter": ent.end_char,
+                        "Letter Span": f"{ent.start_char}-{ent.end_char}",
+                        "Extracted Text": line_text,
+                        "Source Type": "NER Model",
+                        "Detection Engine": HYBRID_KEY,
+                        "Entity / PII Type": display_label,
+                        "Original Value": ent.text,
+                        "Confidence Score": f"{ent.score:.4f}",
+                        "PII / NER Tag": f"<{ent.category}>{ent.text}</{ent.category}>",
+                    }
+                )
+
+    main_csv_path = f"{base_name}.csv"
+    summary_csv_path = f"{base_name}_summary.csv"
+    pii_csv_path = f"{base_name}_pii_detection.csv"
+    ner_csv_path = f"{base_name}_ner_comparison.csv"
+    anon_csv_path = f"{base_name}_anonymization.csv"
+
+    pd.DataFrame(s4_rows).to_csv(main_csv_path, index=False)
+    pd.DataFrame(s1_rows).to_csv(summary_csv_path, index=False)
+    pd.DataFrame(s2_rows).to_csv(pii_csv_path, index=False)
+    pd.DataFrame(s3_rows).to_csv(ner_csv_path, index=False)
+    pd.DataFrame(s4_rows).to_csv(anon_csv_path, index=False)
+
+    print(f"  ✓ Saved CSV reports in output folder: {output_dir}", flush=True)
+    print(f"    • Main CSV: {main_csv_path}", flush=True)
+
+
 
 _C = {
     "header_bg": "1F4E79",
@@ -2058,6 +2308,7 @@ def _auto_width(ws, max_w: int = 55):
 def build_excel(
     records: List[FileRecord], output_path: str, presidio_available: bool
 ):
+    output_path = resolve_output_path(output_path)
     all_model_labels = [
         NER_MODELS["HiNER"][0],
         NER_MODELS["IndicNER"][0],
@@ -2306,8 +2557,11 @@ def process_text_string(
         print("[WARN] --text input is empty; nothing to process.", flush=True)
         return []
 
+    print("\n" + "═" * 78, flush=True)
+    print(f"[INFO] Processing inline text string (label: '{label}')...", flush=True)
     rules = prepare_non_pii_rules(custom_non_pii_list)
     lang = detect_language(text)
+    print(f"[INFO] Detected language: {lang}", flush=True)
     rec = FileRecord(
         path="<inline>",
         filename=label,
@@ -2323,8 +2577,11 @@ def process_text_string(
         queue_size=max(8, queue_size),
         non_pii_rules=rules,
     )
+    print("\n[OUTPUT] Writing Excel, JSON, and CSV reports...", flush=True)
     build_excel([rec], output_path, presidio_ok)
     build_json([rec], output_path)
+    build_csv([rec], output_path, presidio_ok)
+    print("═" * 78 + "\n", flush=True)
 
     return [rec]
 
@@ -2361,7 +2618,7 @@ def parse_args():
         "--output",
         "-o",
         default=DEFAULT_OUTPUT_PATH,
-        help="Output .xlsx file path (default: pii_ner_report.xlsx).",
+        help="Output .xlsx file path (default: output/pii_ner_report.xlsx).",
     )
     ap.add_argument(
         "--hf_token",
@@ -2396,6 +2653,13 @@ def parse_args():
 
 
 def main():
+    print("\n" + "═" * 78, flush=True)
+    print("╔══════════════════════════════════════════════════════════════════════════════╗", flush=True)
+    print("║  MAIN.PY — Multi-Format PII Detection & NER Comparison Pipeline             ║", flush=True)
+    print("║  Supports: .txt, .doc, .docx, .html, .json, .csv                            ║", flush=True)
+    print("╚══════════════════════════════════════════════════════════════════════════════╝", flush=True)
+    print("═" * 78, flush=True)
+
     args = parse_args()
 
     if args.config is not None:
@@ -2450,7 +2714,9 @@ def main():
         return
 
     input_path = args.input if args.input is not None else DEFAULT_INPUT_PATH
+    print(f"\n[INFO] Input Path: {input_path}", flush=True)
     supported_files = collect_files(input_path)
+    print(f"[INFO] Found {len(supported_files)} file(s) to process.", flush=True)
 
     records: List[FileRecord] = []
     for fp in supported_files:
@@ -2471,6 +2737,7 @@ def main():
                 raw_text=raw,
             )
         )
+        print(f"  ➜ Loaded '{os.path.basename(fp)}' | Format: {ftype.upper()} | Language: {lang}", flush=True)
 
     if not records:
         sys.exit("[ERROR] No readable documents found after extraction.")
@@ -2481,8 +2748,14 @@ def main():
         queue_size=max(8, args.queue_size),
         non_pii_rules=rules,
     )
+    print("\n[OUTPUT] Writing Excel, JSON, and CSV reports to output folder...", flush=True)
     build_excel(records, args.output, presidio_ok)
     build_json(records, args.output)
+    build_csv(records, args.output, presidio_ok)
+
+    print("\n" + "═" * 78, flush=True)
+    print("✅ PII & NER Anonymization Pipeline execution completed successfully.", flush=True)
+    print("═" * 78 + "\n", flush=True)
 
 
 if __name__ == "__main__":
