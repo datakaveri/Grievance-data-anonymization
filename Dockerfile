@@ -65,4 +65,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "import grievance_anonymization; print('healthy')" || exit 1
 
 VOLUME ["/app/config", "/app/data", "/app/output", "/app/work"]
-ENTRYPOINT ["python", "-m", "grievance_anonymization.batch_pipeline", "--config", "/app/config"]
+ENTRYPOINT ["python", "-m", "grievance_anonymization.main"]
+CMD ["--config", "/app/config"]

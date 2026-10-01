@@ -79,11 +79,11 @@ Grievance-data-anonymization/
 │       ├── __init__.py          # Package initialization (__version__)
 │       ├── main.py              # Main parallel PII/NER pipeline execution script
 │       ├── batch_pipeline.py    # Config-driven dataset batch mode for downstream integration
-│       ├── model_setup.py       # Dependency setup & HuggingFace model downloader
-│       └── run_100_cases_pipeline.py # Benchmark & process runner
+│       └── model_setup.py       # Dependency setup & HuggingFace model downloader
 ├── tests/
-│   ├── unit/                    # Unit tests
-│   └── integration/             # End-to-end integration tests
+│   ├── conftest.py              # Pytest environment & path setup
+│   ├── unit/                    # Unit test suite (language detection, non-PII filter, PII scanner)
+│   └── integration/             # Integration tests (end-to-end pipeline execution)
 ├── docs/
 │   └── architecture.md          # Architecture overview
 ├── config/
@@ -98,6 +98,7 @@ Grievance-data-anonymization/
 ├── requirements.lock            # Exact pinned lockfile
 ├── Dockerfile                   # Production multi-stage Docker build
 ├── docker-compose.yml           # Docker Compose deployment setup
+├── run_verification_tests.py    # Verification test suite for sample grievance cases
 ├── CHANGELOG.md                 # Release history
 ├── CONTRIBUTING.md              # Guidelines for contributing
 ├── SECURITY.md                  # Security and vulnerability reporting
@@ -125,7 +126,7 @@ cd Grievance-data-anonymization
 python3 -m venv venv
 source venv/bin/activate
 
-# 3. Install package in editable mode
+# 3. Install package in editable mode with development dependencies
 pip install -e .[dev]
 
 # 4. Pre-download NER models (HiNER, IndicNER, XLM-RoBERTa)
@@ -136,7 +137,58 @@ python -m grievance_anonymization.main --input data/sample_complaint.txt --outpu
 
 # 6. OR Run pipeline directly on an inline text string
 python -m grievance_anonymization.main --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123, email: ramesh@example.com" --output output/inline_report.xlsx
+
+# 7. OR Run config-driven dataset batch job
+python -m grievance_anonymization.main --config config/config.json
 ```
+
+---
+
+## Model Setup & HuggingFace Configuration
+
+The pipeline uses three pretrained Hugging Face NER models for multilingual processing (~4.0 GB total download):
+- **HiNER**: `cfilt/HiNER-original-muril-base-cased` (~900 MB) — IIT Bombay / MuRIL (Indian multilingual NER)
+- **IndicNER**: `ai4bharat/IndicNER` (~900 MB) — AI4Bharat Multilingual NER
+- **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (~1.1 GB) — Multilingual NER
+
+All downloaded model weights are cached locally at `~/.cache/huggingface/hub/`.
+
+### 1. Pre-downloading Models
+Run the setup utility script before executing pipeline jobs to ensure all model weights are cached locally:
+```bash
+python -m grievance_anonymization.model_setup
+```
+
+For automated CI/CD pipelines or Docker builds, prefetch models using the `--prefetch` flag:
+```bash
+python -m grievance_anonymization.model_setup --prefetch
+```
+
+### 2. Setting Up Hugging Face Access Token (`HF_TOKEN`)
+Gated Hugging Face model repositories (such as `ai4bharat/IndicNER`) require authentication. Provide your Hugging Face access token using any of the following methods:
+
+- **Option A: Shell Environment Variable**
+  ```bash
+  export HF_TOKEN="hf_your_huggingface_token_here"
+  ```
+- **Option B: `.env` Configuration File**
+  Copy `.env.example` to `.env` in the repository root and populate the token:
+  ```env
+  HF_TOKEN=hf_your_huggingface_token_here
+  ```
+- **Option C: Command Line Argument**
+  ```bash
+  python -m grievance_anonymization.main --hf_token "hf_your_huggingface_token_here" --input data/sample_complaint.txt
+  ```
+- **Option D: Docker Container Environment Pass-through**
+  ```bash
+  docker run --rm \
+    -e HF_TOKEN="hf_your_huggingface_token_here" \
+    -v $(pwd)/config:/app/config \
+    -v $(pwd)/data:/app/data \
+    -v $(pwd)/output:/app/output \
+    grievance-anonymizer:latest
+  ```
 
 ---
 
@@ -147,7 +199,7 @@ python -m grievance_anonymization.main --text "Shri Ramesh Kumar, Aadhaar 2345 6
 docker build -t grievance-anonymizer:latest .
 ```
 
-#### 2. Run Container
+#### 2. Run Container (Default Batch Mode)
 ```bash
 docker run --rm \
   -v $(pwd)/config:/app/config \
@@ -156,12 +208,26 @@ docker run --rm \
   grievance-anonymizer:latest
 ```
 
+#### 3. Run Container with Custom Input File or Inline Text
+```bash
+# Analyze a file
+docker run --rm \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/output:/app/output \
+  grievance-anonymizer:latest --input /app/data/sample_complaint.txt --output /app/output/report.xlsx
+
+# Analyze an inline text string
+docker run --rm \
+  -v $(pwd)/output:/app/output \
+  grievance-anonymizer:latest --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123" --output /app/output/inline.xlsx
+```
+
 ---
 
 ### Option 3: Running with Docker Compose
 
 ```bash
-# Build and launch container
+# Build and launch container in background or foreground
 docker compose up --build
 ```
 
@@ -171,11 +237,14 @@ docker compose up --build
 
 | Argument | Short Flag | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `--config` | | `None` | Run config-driven dataset batch job using a JSON config file or directory to scan. |
 | `--input` | `-i` | `data/sample_complaint.txt` | Path to a single file (`.txt`/`.docx`/`.doc`/`.html`/`.json`/`.csv`) or folder containing documents. |
 | `--text` | `-t` | `None` | Inline text string to analyze directly instead of reading files. |
-| `--output` | `-o` | `pii_ner_report.xlsx` | Output `.xlsx` file path (JSON reports generated automatically). |
+| `--output` | `-o` | `output/pii_ner_report.xlsx` | Output `.xlsx` file path (JSON and CSV reports generated automatically). |
 | `--ner-batch-size` | | `24` | Batch size for parallel line inference across model workers. |
 | `--queue-size` | | `64` | Maximum queue size for bounded dispatcher backpressure. |
+| `--non-pii-list` | | `None` | Comma-separated or JSON list of words/rules to exclude (e.g. `'PLS:ORG,PLEASE'`). |
+| `--non-pii-file` | | `None` | Path to JSON file containing custom non-PII exclusion rules list. |
 | `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models. |
 
 ---
@@ -193,6 +262,20 @@ The batch job anonymizes configured columns of a CSV/XLSX/JSON dataset. It reads
 | `staged_input_path` | — | Where the anonymized CSV is written (must end in `.csv`). |
 | `audit_output_path` | — | Optional JSON audit of every applied detection. |
 | `on_failure` | `"fail"` | `"fail"` aborts the run on a cell error; `"continue"` records it. |
+
+---
+
+## Testing & Verification
+
+Run unit tests, integration tests, and verification scripts to confirm system readiness:
+
+```bash
+# Run complete test suite with PyTest
+pytest
+
+# Run verification test script for sample grievance test cases
+python run_verification_tests.py
+```
 
 ---
 
