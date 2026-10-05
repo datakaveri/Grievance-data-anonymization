@@ -1,0 +1,18 @@
+name: Feature Request
+description: Suggest an enhancement, new PII detector, or model addition
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: feature-description
+    attributes:
+      label: Feature Description
+      description: Describe the proposed feature or improvement.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case & Motivation
+      description: Why is this feature needed and what problem does it solve?
+    validations:
+      required: true

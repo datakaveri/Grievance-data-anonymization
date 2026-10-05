@@ -1,156 +1,284 @@
-# 🛡️ Grievance Data Anonymization Pipeline
+# Grievance Data PII Anonymization & High-Performance NER Evaluation Pipeline
 
-A production-ready, unified batch processing pipeline for **OCR-based document text extraction, Named Entity Recognition (NER), multi-category PII detection, and automated redaction/anonymization**.
+A production-ready, unified processing pipeline for multi-format grievance analysis, language identification, multi-category PII detection (Regex + Presidio), automated contextual redaction, and parallel multi-model Named Entity Recognition (NER) benchmarking.
 
-Built specifically for handling complex document grievances in English and Devanagari/Hindi scripts.
-
----
-
-## 🌟 Key Features
-
-1. **Chandra 2 Layout-Aware OCR Engine**: Batch document text extraction with GPU memory optimization and automatic image resizing.
-2. **Multi-Model NER Benchmark**: Evaluates and compares 4 specialized NER models:
-   - `cfilt/HiNER-original-muril-base-cased` (HiNER - IIT Bombay / MuRIL)
-   - `ai4bharat/IndicNER` / `techysanoj/fine-tuned-IndicNER` (IndicNER)
-   - `dslim/bert-base-NER` (BERT English)
-   - `Babelscape/wikineural-multilingual-ner` (XLM-RoBERTa Multilingual)
-3. **20-Category Expanded PII Detection**:
-   - **Identifiers**: Aadhaar, PAN, Voter ID, Passport, PPP ID, Vehicle Number, User ID
-   - **Contact & Web**: Email, Phone Number, IP Address
-   - **Financial**: Credit Card Number, Bank Account Number
-   - **Dates & Temporal**: Date of Birth (DOB), Generic Dates
-   - **Entities & Context**: Name (PER), Location (LOC), Address, Organization (ORG), Personal Relations (S/o, D/o), Sign/Signature Keywords
-4. **Custom Anonymization Strategies**: Redacts and masks sensitive values while retaining data utility (e.g., masking Aadhaar as `XXXX XXXX 1234`, PAN as `ABCDE****F`, Email as `ab****@domain.com`).
-5. **Comprehensive Excel Report Generation**: Exports complete comparative metrics across 3 structured sheets:
-   - **Model Comparison Summary**: Aggregated accuracy, detection counts, and metrics per model.
-   - **OCR & NER Line Details**: Line-by-line detailed breakdown of extracted text, detected entities, and anonymized outputs.
-   - **PII Aggregated by Image**: Document-level consolidated PII detection and redaction log.
+Built to process administrative, medical, and public grievance documents in English, Indic scripts (Hindi/Devanagari, Bengali, Tamil, Telugu), and mixed languages.
 
 ---
 
-## 📂 Project Structure
+## Features
+
+1. **High-Performance Queue-Driven Parallel NER Pipeline (`src/grievance_anonymization/main.py`)**:
+   - Multi-threaded fan-out / fan-in worker architecture processing models in parallel.
+   - **Optimized CPU Execution**: Runs cleanly on CPU (`CUDA_VISIBLE_DEVICES=""`) with zero CUDA driver probing warnings or delays.
+   - **Rust Multi-Threaded Downloads (`hf_transfer`)**: Accelerates HuggingFace model weight downloads by 5x to 10x.
+   - **Autograd Memory Reduction (`torch.inference_mode()`)**: Eliminates PyTorch tensor tracking overhead on CPU forward passes.
+   - **Smart Single-Pass True-Casing & Line Pre-Filtering**: Cuts inference passes in half and filters out short non-text noise (< 3 characters).
+
+2. **Multi-Format Document & Inline Text String Input Support**:
+   - Reads `.txt`, `.docx`, `.doc`, `.html`, `.json`, and `.csv` files (single file or entire directory).
+   - Supports direct **inline text string analysis** via command-line argument (`--text "Your text here"`).
+
+3. **Automatic Script & Language Detection**:
+   - Classifies document languages into Hindi (Devanagari), Bengali, Tamil, Telugu, English, Mixed, or Unknown.
+
+4. **Structured & Contextual PII Detection Engine**:
+   - Labeled and unlabelled pattern scanning with false-positive filtering.
+   - **20+ PII Categories**:
+     - *Government & Identifiers*: Aadhaar Number, PAN Card, Voter ID, Passport Number, Driving License, Parivar Pehchan Patra (PPP / Family ID), User ID / Portal ID.
+     - *Financial*: Bank Account Number (with context validation), Credit / Debit Card Number, IFSC Code.
+     - *Contact & Network*: Phone Number, Email Address, IP Address.
+     - *Administrative & Location*: Indian Cities / Districts (e.g., Karnal, Jhajjar, Rohtak, Gurugram, Delhi), Pin Codes.
+     - *Personal Particulars*: Person Names with Honorifics (*Shri*, *Smt.*, *Dr.*, *Prof.*), Date of Birth (DOB), Age.
+
+5. **Granular Word & Character Position Tracking**:
+   - Computes Line No, Word No, Word Position (ordinal: `1st`, `2nd`), Start Letter & End Letter character offsets, and Letter Span (`12-24`).
+   - Includes Confidence Scores (`1.00 (Exact Regex)` or model prediction probabilities).
+
+6. **Privacy-Preserving Anonymization Strategies**:
+   - **Partial Masking**: Aadhaar (`XXXX XXXX 1234`), Phone (`XXXXXX9876`), Bank Account (`********5678`), PAN (`ABCDE****F`).
+   - **Domain-Preserving Masking**: Email (`jo****@domain.com`).
+   - **Tokenization**: Credit Card (`XXXX-XXXX-XXXX-4321`).
+   - **Initial-Only Masking**: Person Names (`R. K. S.`).
+   - **One-Way Hashing**: SHA-256 hash for generic tokens.
+
+7. **Multilingual NER Ensemble**:
+   Uses three models for multilingual entity extraction:
+   - **HiNER**: `cfilt/HiNER-original-muril-base-cased` (IIT Bombay / MuRIL)
+   - **IndicNER**: `ai4bharat/IndicNER` (AI4Bharat Multilingual)
+   - **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (Multilingual)
+   - **Hybrid**: Ensemble of HiNER + IndicNER + XLM-RoBERTa.
+
+8. **Multi-Report Output System (Excel & Per-Model JSONs)**:
+   - **4-Sheet Color-Coded Excel Workbook**:
+     - *Sheet 1: Summary*: Overview of processed files, script language, total PII hits, and detection status.
+     - *Sheet 2: PII Detection*: Detailed audit log of detected PII with line numbers, word positions, letter spans, detector source, display names, and XML tags.
+     - *Sheet 3: NER Comparison*: Model-by-model comparison of predicted types (`PERSON`, `LOCATION`, `ORGANIZATION`), extracted entity text, and strict missed entity computation.
+     - *Sheet 4: Anonymization*: Complete record of original values vs anonymized output, confidence scores, position metrics, redaction technique, and description.
+   - **Per-Model JSON Reports**: Automatically generates a master JSON report (`pii_ner_report.json`) as well as separate model-specific JSON files (`pii_ner_report_HiNER.json`, `pii_ner_report_IndicNER.json`, `pii_ner_report_Hybrid.json`, etc.).
+
+---
+
+## Repository Layout
 
 ```text
 Grievance-data-anonymization/
-├── app/
-│   ├── chandra2_setup.py   # Initializes Chandra OCR isolated venv and inference script
-│   └── main.py             # Main execution workflow (OCR -> NER -> PII -> Excel Export)
-├── data/
-│   └── source_images/      # Place your input document images here (.jpg, .png, .tiff, etc.)
-├── output/                 # Output folder for generated Excel reports and temp manifests
-├── Dockerfile              # Container definition for reproducible deployment
-├── docker-compose.yml      # Orchestration config for running container with volumes
-├── .dockerignore           # Excluded files for Docker build context
-├── .gitignore              # Git ignored files and cache patterns
-├── requirements.txt        # Clean Python dependencies
-└── README.md               # Project documentation
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml               # Lint, test, build CI workflow
+│   │   ├── release.yml          # Tagged release and Docker publish
+│   │   └── codeql.yml           # Security scanning
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   └── feature_request.yml
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   ├── CODEOWNERS               # Code reviewers
+│   └── dependabot.yml           # Dependency update configuration
+├── src/
+│   └── grievance_anonymization/
+│       ├── __init__.py          # Package initialization (__version__)
+│       ├── main.py              # Main parallel PII/NER pipeline execution script
+│       ├── batch_pipeline.py    # Config-driven dataset batch mode for downstream integration
+│       └── model_setup.py       # Dependency setup & HuggingFace model downloader
+├── tests/
+│   ├── conftest.py              # Pytest environment & path setup
+│   ├── unit/                    # Unit test suite (language detection, non-PII filter, PII scanner)
+│   └── integration/             # Integration tests (end-to-end pipeline execution)
+├── docs/
+│   └── architecture.md          # Architecture overview
+├── config/
+│   ├── config.json              # Active configuration
+│   └── config.example.json      # Committed example configuration template
+├── .dockerignore
+├── .gitignore
+├── .env.example                 # Environment variables specification
+├── .pre-commit-config.yaml      # Code quality & secret scanner hooks
+├── pyproject.toml               # Python package metadata & dependencies
+├── requirements.txt             # Pinned requirements with comments
+├── requirements.lock            # Exact pinned lockfile
+├── Dockerfile                   # Production multi-stage Docker build
+├── docker-compose.yml           # Docker Compose deployment setup
+├── run_verification_tests.py    # Verification test suite for sample grievance cases
+├── CHANGELOG.md                 # Release history
+├── CONTRIBUTING.md              # Guidelines for contributing
+├── SECURITY.md                  # Security and vulnerability reporting
+├── LICENSE                      # Apache-2.0 open-source licence
+└── README.md                    # Project documentation
 ```
 
 ---
 
-## ⚡ Quickstart Guide
+## Quickstart Guide
 
-### Option 1: Running with Docker (Recommended)
+### Option 1: Local Setup (Native Python)
 
 #### Prerequisites
-- [Docker Engine](https://docs.docker.com/get-docker/) installed.
-- (Optional but recommended for speed) [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) for GPU acceleration.
+- Python 3.10+
+- PyTorch (CPU or CUDA)
+
+#### Steps:
+```bash
+# 1. Clone repository
+git clone https://github.com/datakaveri/Grievance-data-anonymization.git
+cd Grievance-data-anonymization
+
+# 2. Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install package in editable mode with development dependencies
+pip install -e .[dev]
+
+# 4. Pre-download NER models (HiNER, IndicNER, XLM-RoBERTa)
+python -m grievance_anonymization.model_setup
+
+# 5. Run High-Performance Parallel Pipeline on input folder or file
+python -m grievance_anonymization.main --input data/sample_complaint.txt --output output/pii_ner_report.xlsx
+
+# 6. OR Run pipeline directly on an inline text string
+python -m grievance_anonymization.main --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123, email: ramesh@example.com" --output output/inline_report.xlsx
+
+# 7. OR Run config-driven dataset batch job
+python -m grievance_anonymization.main --config config/config.json
+```
+
+---
+
+## Model Setup & HuggingFace Configuration
+
+The pipeline uses three pretrained Hugging Face NER models for multilingual processing (~4.0 GB total download):
+- **HiNER**: `cfilt/HiNER-original-muril-base-cased` (~900 MB) — IIT Bombay / MuRIL (Indian multilingual NER)
+- **IndicNER**: `ai4bharat/IndicNER` (~900 MB) — AI4Bharat Multilingual NER
+- **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (~1.1 GB) — Multilingual NER
+
+All downloaded model weights are cached locally at `~/.cache/huggingface/hub/`.
+
+### 1. Pre-downloading Models
+Run the setup utility script before executing pipeline jobs to ensure all model weights are cached locally:
+```bash
+python -m grievance_anonymization.model_setup
+```
+
+For automated CI/CD pipelines or Docker builds, prefetch models using the `--prefetch` flag:
+```bash
+python -m grievance_anonymization.model_setup --prefetch
+```
+
+### 2. Setting Up Hugging Face Access Token (`HF_TOKEN`)
+Gated Hugging Face model repositories (such as `ai4bharat/IndicNER`) require authentication. Provide your Hugging Face access token using any of the following methods:
+
+- **Option A: Shell Environment Variable**
+  ```bash
+  export HF_TOKEN="hf_your_huggingface_token_here"
+  ```
+- **Option B: `.env` Configuration File**
+  Copy `.env.example` to `.env` in the repository root and populate the token:
+  ```env
+  HF_TOKEN=hf_your_huggingface_token_here
+  ```
+- **Option C: Command Line Argument**
+  ```bash
+  python -m grievance_anonymization.main --hf_token "hf_your_huggingface_token_here" --input data/sample_complaint.txt
+  ```
+- **Option D: Docker Container Environment Pass-through**
+  ```bash
+  docker run --rm \
+    -e HF_TOKEN="hf_your_huggingface_token_here" \
+    -v $(pwd)/config:/app/config \
+    -v $(pwd)/data:/app/data \
+    -v $(pwd)/output:/app/output \
+    grievance-anonymizer:latest
+  ```
+
+---
+
+### Option 2: Running with Docker
 
 #### 1. Build Docker Image
 ```bash
 docker build -t grievance-anonymizer:latest .
 ```
 
-#### 2. Run Container
-
-**GPU Mode (Recommended):**
+#### 2. Run Container (Default Batch Mode)
 ```bash
-docker run --gpus all \
-  -v $(pwd)/data/source_images:/app/data/source_images \
+docker run --rm \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
   -v $(pwd)/output:/app/output \
-  -e HF_TOKEN="your_huggingface_token_here" \
   grievance-anonymizer:latest
 ```
 
-**CPU Mode:**
+#### 3. Run Container with Custom Input File or Inline Text
 ```bash
-docker run \
-  -v $(pwd)/data/source_images:/app/data/source_images \
+# Analyze a file
+docker run --rm \
+  -v $(pwd)/data:/app/data \
   -v $(pwd)/output:/app/output \
-  grievance-anonymizer:latest
+  grievance-anonymizer:latest --input /app/data/sample_complaint.txt --output /app/output/report.xlsx
+
+# Analyze an inline text string
+docker run --rm \
+  -v $(pwd)/output:/app/output \
+  grievance-anonymizer:latest --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123" --output /app/output/inline.xlsx
 ```
 
 ---
 
-### Option 2: Running with Docker Compose
+### Option 3: Running with Docker Compose
 
 ```bash
-# 1. Add your images into data/source_images/
-mkdir -p data/source_images output
-
-# 2. (Optional) Set your HuggingFace token
-export HF_TOKEN="your_huggingface_token_here"
-
-# 3. Build and launch
+# Build and launch container in background or foreground
 docker compose up --build
 ```
 
 ---
 
-### Option 3: Local Setup (Native Python)
+## Command Line Arguments (`src/grievance_anonymization/main.py`)
 
-#### Prerequisites
-- Python 3.10+
-- PyTorch (CUDA recommended if GPU is present)
+| Argument | Short Flag | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `--config` | | `None` | Run config-driven dataset batch job using a JSON config file or directory to scan. |
+| `--input` | `-i` | `data/sample_complaint.txt` | Path to a single file (`.txt`/`.docx`/`.doc`/`.html`/`.json`/`.csv`) or folder containing documents. |
+| `--text` | `-t` | `None` | Inline text string to analyze directly instead of reading files. |
+| `--output` | `-o` | `output/pii_ner_report.xlsx` | Output `.xlsx` file path (JSON and CSV reports generated automatically). |
+| `--ner-batch-size` | | `24` | Batch size for parallel line inference across model workers. |
+| `--queue-size` | | `64` | Maximum queue size for bounded dispatcher backpressure. |
+| `--non-pii-list` | | `None` | Comma-separated or JSON list of words/rules to exclude (e.g. `'PLS:ORG,PLEASE'`). |
+| `--non-pii-file` | | `None` | Path to JSON file containing custom non-PII exclusion rules list. |
+| `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models. |
 
-#### Steps:
+---
+
+## Dataset Batch Job (`src/grievance_anonymization/batch_pipeline.py`)
+
+The batch job anonymizes configured columns of a CSV/XLSX/JSON dataset. It reads its settings from the `free_text_anonymization` object in the dataset config:
+
+| Config key | Default | Description |
+| :--- | :---: | :--- |
+| `enabled` | — | Must be `true` for the job to write a staged file. |
+| `columns` | — | List of column names to anonymize. All must exist in the input. |
+| `minimum_confidence` | `0.0` | Detections below this confidence are ignored. |
+| `ner_batch_size` | `256` | Lines handed to each inference call. |
+| `staged_input_path` | — | Where the anonymized CSV is written (must end in `.csv`). |
+| `audit_output_path` | — | Optional JSON audit of every applied detection. |
+| `on_failure` | `"fail"` | `"fail"` aborts the run on a cell error; `"continue"` records it. |
+
+---
+
+## Testing & Verification
+
+Run unit tests, integration tests, and verification scripts to confirm system readiness:
+
 ```bash
-# 1. Clone repo & navigate into project directory
-git clone https://github.com/datakaveri/Grievance-data-anonymization.git
-cd Grievance-data-anonymization
+# Run complete test suite with PyTest
+pytest
 
-# 2. Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Install core dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-
-# 4. Run Chandra 2 Setup Script
-python app/chandra2_setup.py
-
-# 5. Add input document images to data/source_images/
-mkdir -p data/source_images output
-
-# 6. Run the Main Pipeline
-python app/main.py
+# Run verification test script for sample grievance test cases
+python run_verification_tests.py
 ```
 
 ---
 
-## ⚙️ Environment Variables
+## Security & Privacy
 
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `HF_TOKEN` | *None* | Optional HuggingFace Access Token (required for gated models like IndicNER). |
-| `IMAGE_FOLDER_PATH` | `/app/data/source_images` | Path to directory containing source document images. |
-| `OUTPUT_DIR` | `/app/output` | Path to directory where output Excel reports are saved. |
-| `CHANDRA_VENV_PY` | `/app/chandra_venv/bin/python` | Executable path for Chandra OCR virtual environment. |
-| `CHANDRA_SCRIPT` | `/app/chandra_infer_script.py` | Path to Chandra OCR inference worker script. |
-
----
-
-## 📊 Output Files
-
-Upon successful execution, the pipeline generates:
-`output/chandra_ner_pii_batch_comparison.xlsx` containing:
-1. **Model Comparison Summary**: Overall benchmark matrix comparing entity detection rates across models.
-2. **OCR & NER Line Details**: Complete line-level extraction, classification, and masking results.
-3. **PII Aggregated by Image**: Image-level consolidated view of all redacted personal information.
-
----
-
-## 🔒 Security & Privacy Note
-
-All processing (OCR extraction, NER inference, regex scanning, and redaction) is performed **100% locally** or within your container instance. No document text or extracted PII is sent to external API endpoints.
+All processing is executed **100% locally** on your machine or container. No document content, personal identifiers, or metadata are transmitted to external services.

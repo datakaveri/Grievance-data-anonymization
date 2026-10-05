@@ -1,53 +1,69 @@
-# Use official Python 3.10 slim image as base
-FROM python:3.10-slim
+# syntax=docker/dockerfile:1
+# ── Stage 1: Build stage ──────────────────────────────────────────────────────
+FROM python:3.10-slim AS builder
 
-# Prevent Python from writing bytecode and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    CUDA_VISIBLE_DEVICES="" \
+    HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Install essential system dependencies for OpenCV, PyTorch, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     curl \
-    python3-venv \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory inside container
+WORKDIR /build
+
+COPY requirements.txt pyproject.toml README.md ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir hf-transfer && \
+    pip install --no-cache-dir .
+
+# ── Stage 2: Final runtime stage ──────────────────────────────────────────────
+FROM python:3.10-slim AS final
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    CUDA_VISIBLE_DEVICES="" \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PYTHONPATH=/app/src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -g 10001 appuser && \
+    useradd -u 10001 -g appuser -s /bin/bash -m appuser
+
 WORKDIR /app
 
-# Copy requirements file first for layer caching
-COPY requirements.txt .
+# Copy site-packages from builder
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Install main application Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+COPY src/ ./src/
+COPY config/ ./config/
 
-# Pre-build isolated virtual environment for Chandra 2 OCR engine
-RUN python3 -m venv /app/chandra_venv && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir --upgrade pip && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 && \
-    /app/chandra_venv/bin/python -m pip install --no-cache-dir "transformers>=4.40,<5.0" "chandra-ocr[hf]" "pillow>=10.0" "accelerate>=0.26"
+RUN mkdir -p /app/config /app/data /app/output /app/work && \
+    chown -R appuser:appuser /app
 
-# Create directories for data inputs and outputs
-RUN mkdir -p /app/data/source_images /app/output
+# Pre-cache HuggingFace NER models
+RUN --mount=type=secret,id=hf_token,env=HF_TOKEN \
+    python -m grievance_anonymization.model_setup --prefetch
 
-# Copy application source code
-COPY app/ ./app/
+USER appuser
 
-# Environment Variables
-ENV BASE_DIR=/app \
-    IMAGE_FOLDER_PATH=/app/data/source_images \
-    OUTPUT_DIR=/app/output \
-    CHANDRA_VENV=/app/chandra_venv \
-    CHANDRA_VENV_PY=/app/chandra_venv/bin/python \
-    CHANDRA_SCRIPT=/app/chandra_infer_script.py
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import grievance_anonymization; print('healthy')" || exit 1
 
-# Command to execute setup and main batch anonymization pipeline
-CMD ["sh", "-c", "python app/chandra2_setup.py && python app/main.py"]
+VOLUME ["/app/config", "/app/data", "/app/output", "/app/work"]
+ENTRYPOINT ["python", "-m", "grievance_anonymization.main"]
+CMD ["--config", "/app/config"]
