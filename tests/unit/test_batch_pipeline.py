@@ -44,3 +44,8 @@ def test_hardcoded_policy():
     val, tech = _hardcoded_policy("Aadhaar", "123456789012", "col", salts)
     assert "9012" in val
     assert tech == "partial_mask"
+
+
+def test_batch_error():
+    err = BatchError("Test batch failure")
+    assert str(err) == "Test batch failure"
