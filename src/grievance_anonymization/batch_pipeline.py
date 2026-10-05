@@ -17,34 +17,34 @@ import pandas as pd
 
 try:
     from grievance_anonymization.main import (
+        _TRANSFORMERS_AVAILABLE,
         NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
         full_pii_scan,
         merge_pii_hits,
         run_corpus_line_ner,
-        _TRANSFORMERS_AVAILABLE,
     )
 except ModuleNotFoundError:
     try:
         from main import (
+            _TRANSFORMERS_AVAILABLE,
             NER_CORPUS_BATCH_SIZE,
             PiiHit,
             detect_language,
             full_pii_scan,
             merge_pii_hits,
             run_corpus_line_ner,
-            _TRANSFORMERS_AVAILABLE,
         )
     except ModuleNotFoundError:
         from .main import (
+            _TRANSFORMERS_AVAILABLE,
             NER_CORPUS_BATCH_SIZE,
             PiiHit,
             detect_language,
             full_pii_scan,
             merge_pii_hits,
             run_corpus_line_ner,
-            _TRANSFORMERS_AVAILABLE,
         )
 
 REDACTED = "*"
@@ -83,8 +83,11 @@ def _resolve_config_file(config_arg: Path) -> Path:
         raise BatchError(f"Config path not found: {config_arg}")
 
     candidates = sorted(
-        p for p in config_arg.iterdir()
-        if p.is_file() and p.suffix.lower() == ".json" and p.name not in _RESERVED_CONFIG_NAMES
+        p
+        for p in config_arg.iterdir()
+        if p.is_file()
+        and p.suffix.lower() == ".json"
+        and p.name not in _RESERVED_CONFIG_NAMES
     )
     if not candidates:
         raise BatchError(f"No config JSON found in {config_arg}")
@@ -134,7 +137,9 @@ def _read_table(path: Path) -> tuple[pd.DataFrame, str]:
                 return pd.DataFrame(payload), "json"
     except Exception as exc:
         raise BatchError(f"Could not read {path}: {exc}") from exc
-    raise BatchError(f"Unsupported input format {path.suffix!r}; use CSV, JSON, XLS, or XLSX")
+    raise BatchError(
+        f"Unsupported input format {path.suffix!r}; use CSV, JSON, XLS, or XLSX"
+    )
 
 
 _SUPPORTED_SOURCE_EXTS = {".csv", ".json", ".xls", ".xlsx"}
@@ -149,8 +154,11 @@ def _resolve_source_input(dataset: dict[str, Any], work_root: Path) -> Path:
     if not data_dir.is_dir():
         raise BatchError(f"Data directory not found: {data_dir}")
     candidates = sorted(
-        p for p in data_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in _SUPPORTED_SOURCE_EXTS and p.stat().st_size > 0
+        p
+        for p in data_dir.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in _SUPPORTED_SOURCE_EXTS
+        and p.stat().st_size > 0
     )
     if not candidates:
         raise BatchError(f"No CSV, JSON, or Excel file found in {data_dir}")
@@ -164,7 +172,9 @@ def _resolve_source_input(dataset: dict[str, Any], work_root: Path) -> Path:
 
 def _write_table(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=path.suffix, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, suffix=path.suffix, delete=False
+    ) as tmp:
         temporary = Path(tmp.name)
     try:
         df.to_csv(temporary, index=False)
@@ -198,7 +208,9 @@ def _absolute_hits(text: str) -> list[tuple[int, int, PiiHit]]:
     return result
 
 
-def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]) -> tuple[str, str]:
+def _hardcoded_policy(
+    label: str, value: str, column: str, salts: dict[str, str]
+) -> tuple[str, str]:
     normalized = label.upper().replace(" ", "_")
     original = value
     value = value.strip()
@@ -206,31 +218,54 @@ def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]
         return original, "retained"
     if "AADHAAR" in normalized:
         digits = "".join(ch for ch in value if ch.isdigit())
-        return (f"XXXX XXXX {digits[-4:]}" if len(digits) == 12 else REDACTED, "partial_mask")
+        return (
+            f"XXXX XXXX {digits[-4:]}" if len(digits) == 12 else REDACTED,
+            "partial_mask",
+        )
     if "PAN" in normalized:
         compact = value.replace(" ", "")
-        return (f"{compact[:5]}****{compact[-1]}" if len(compact) == 10 else REDACTED, "partial_mask")
+        return (
+            f"{compact[:5]}****{compact[-1]}" if len(compact) == 10 else REDACTED,
+            "partial_mask",
+        )
     if "PHONE" in normalized:
         return REDACTED, "suppress"
     if "EMAIL" in normalized:
         if "@" not in value:
             return REDACTED, "suppress"
         local, domain = value.split("@", 1)
-        masked = local[:2] + "*" * max(1, len(local) - 2) if len(local) > 2 else local[:1] + "*"
+        masked = (
+            local[:2] + "*" * max(1, len(local) - 2)
+            if len(local) > 2
+            else local[:1] + "*"
+        )
         return f"{masked}@{domain}", "domain_preserving_mask"
     if "BANK" in normalized or "ACCOUNT" in normalized:
         digits = "".join(ch for ch in value if ch.isdigit())
-        return ("*" * max(0, len(digits) - 4) + digits[-4:] if len(digits) >= 4 else REDACTED, "partial_mask")
+        return (
+            (
+                "*" * max(0, len(digits) - 4) + digits[-4:]
+                if len(digits) >= 4
+                else REDACTED
+            ),
+            "partial_mask",
+        )
     if "CARD" in normalized or "CREDIT" in normalized:
         digits = "".join(ch for ch in value if ch.isdigit())
-        return (f"XXXX-XXXX-XXXX-{digits[-4:]}" if len(digits) >= 16 else REDACTED, "tokenization")
+        return (
+            f"XXXX-XXXX-XXXX-{digits[-4:]}" if len(digits) >= 16 else REDACTED,
+            "tokenization",
+        )
     if "DATE" in normalized or "DOB" in normalized:
         year = next(iter(__import__("re").findall(r"(?:19|20)\d{2}", value)), "")
         return (f"XX-XX-{year}" if year else "[DATE REDACTED]", "date_generalization")
     if "PINCODE" in normalized:
         digits = "".join(ch for ch in value if ch.isdigit())
         return (digits[:3] + "XXX" if len(digits) >= 6 else REDACTED, "partial_mask")
-    if any(term in normalized for term in ("PERSON", "NAME", "LOCATION", "LOC", "ORGANIZATION", "ORG")):
+    if any(
+        term in normalized
+        for term in ("PERSON", "NAME", "LOCATION", "LOC", "ORGANIZATION", "ORG")
+    ):
         return REDACTED, "suppress"
     salt = salts.setdefault(column, secrets.token_hex(32))
     return hashlib.sha256((salt + value).encode()).hexdigest(), "salted_hash"
@@ -248,7 +283,9 @@ def _ner_lines(text: str) -> list[tuple[int, str]]:
     return result
 
 
-def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[str, Any]]]:
+def _build_ner_index(
+    texts: list[str], batch_size: int
+) -> dict[str, list[dict[str, Any]]]:
     line_ids: dict[str, int] = {}
     corpus: list[str] = []
     for text in texts:
@@ -271,14 +308,16 @@ def _build_ner_index(texts: list[str], batch_size: int) -> dict[str, list[dict[s
         for line_idx, stripped in _ner_lines(text):
             base = bases[line_idx]
             for entity in entities[line_ids[stripped]]:
-                hits.append({
-                    "start": base + entity.start_char - 1,
-                    "end": base + entity.end_char,
-                    "label": entity.category,
-                    "source": "Hybrid NER",
-                    "confidence": entity.score,
-                    "value": entity.text,
-                })
+                hits.append(
+                    {
+                        "start": base + entity.start_char - 1,
+                        "end": base + entity.end_char,
+                        "label": entity.category,
+                        "source": "Hybrid NER",
+                        "confidence": entity.score,
+                        "value": entity.text,
+                    }
+                )
         index[text] = hits
     return index
 
@@ -295,11 +334,20 @@ def _sanitize(
 
     language = detect_language(text)
     detections = [
-        {"start": start, "end": end, "label": hit.label, "source": hit.source, "confidence": hit.confidence, "value": hit.value}
+        {
+            "start": start,
+            "end": end,
+            "label": hit.label,
+            "source": hit.source,
+            "confidence": hit.confidence,
+            "value": hit.value,
+        }
         for start, end, hit in _absolute_hits(text)
         if hit.confidence >= minimum_confidence
     ]
-    detections.extend(item for item in ner_hits if item["confidence"] >= minimum_confidence)
+    detections.extend(
+        item for item in ner_hits if item["confidence"] >= minimum_confidence
+    )
     hits = sorted(detections, key=lambda item: (item["start"], item["end"]))
     if not hits:
         return text, []
@@ -315,18 +363,22 @@ def _sanitize(
     output = text
     audit: list[dict[str, Any]] = []
     for start, end, span_hits in reversed(spans):
-        replacement, technique = _hardcoded_policy(span_hits[0]["label"], text[start:end], column, salts)
+        replacement, technique = _hardcoded_policy(
+            span_hits[0]["label"], text[start:end], column, salts
+        )
         output = output[:start] + replacement + output[end:]
         for hit in span_hits:
-            audit.append({
-                "label": hit["label"],
-                "source": hit["source"],
-                "language": language,
-                "technique": technique,
-                "confidence": hit["confidence"],
-                "start_offset": start,
-                "end_offset": end,
-            })
+            audit.append(
+                {
+                    "label": hit["label"],
+                    "source": hit["source"],
+                    "language": language,
+                    "technique": technique,
+                    "confidence": hit["confidence"],
+                    "start_offset": start,
+                    "end_offset": end,
+                }
+            )
     return output, list(reversed(audit))
 
 
@@ -343,7 +395,9 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
 
     df, _source_format = _read_table(source)
     if settings.get("enabled") is not True:
-        print("[Batch] free_text_anonymization.enabled is false; no staged file written.")
+        print(
+            "[Batch] free_text_anonymization.enabled is false; no staged file written."
+        )
         return {"status": "disabled", "rows": len(df), "columns": len(df.columns)}
     if not _TRANSFORMERS_AVAILABLE:
         raise BatchError(
@@ -352,12 +406,18 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
         )
 
     columns = settings.get("columns")
-    if not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
-        raise BatchError("free_text_anonymization.columns must be a list of column names")
+    if not isinstance(columns, list) or not all(
+        isinstance(col, str) for col in columns
+    ):
+        raise BatchError(
+            "free_text_anonymization.columns must be a list of column names"
+        )
     missing = [col for col in columns if col not in df.columns]
     on_failure = settings.get("on_failure", "fail")
     if on_failure not in {"fail", "continue"}:
-        raise BatchError("free_text_anonymization.on_failure must be 'fail' or 'continue'")
+        raise BatchError(
+            "free_text_anonymization.on_failure must be 'fail' or 'continue'"
+        )
     if missing:
         raise BatchError(f"Configured columns are missing from input: {missing}")
 
@@ -404,9 +464,13 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
                 for item in accepted:
                     audit.append({"row": row_index + 1, "column": column, **item})
             except Exception as exc:
-                failures.append({"row": row_index + 1, "column": column, "error": str(exc)})
+                failures.append(
+                    {"row": row_index + 1, "column": column, "error": str(exc)}
+                )
                 if on_failure == "fail":
-                    raise BatchError(f"Anonymization failed at row {row_index + 1}, column {column!r}: {exc}") from exc
+                    raise BatchError(
+                        f"Anonymization failed at row {row_index + 1}, column {column!r}: {exc}"
+                    ) from exc
         df.isetitem(loc, values)
 
     column_order = {column: rank for rank, column in enumerate(columns)}
@@ -429,20 +493,41 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
         audit_path = _path(audit_path_value, work_root)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         with audit_path.open("w", encoding="utf-8") as fh:
-            json.dump({"rows": len(df), "columns": list(df.columns), "detections": audit, "failures": failures}, fh, indent=2)
+            json.dump(
+                {
+                    "rows": len(df),
+                    "columns": list(df.columns),
+                    "detections": audit,
+                    "failures": failures,
+                },
+                fh,
+                indent=2,
+            )
     print(f"[Batch] Wrote staged dataset: {staged}")
-    print(f"[Batch] Rows: {len(df)}; detections: {len(audit)}; failures: {len(failures)}")
-    return {"status": "completed", "rows": len(df), "detections": len(audit), "failures": len(failures), "staged_input_path": str(staged)}
+    print(
+        f"[Batch] Rows: {len(df)}; detections: {len(audit)}; failures: {len(failures)}"
+    )
+    return {
+        "status": "completed",
+        "rows": len(df),
+        "detections": len(audit),
+        "failures": len(failures),
+        "staged_input_path": str(staged),
+    }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Config-driven dataset free-text anonymization")
+    parser = argparse.ArgumentParser(
+        description="Config-driven dataset free-text anonymization"
+    )
     parser.add_argument(
         "--config",
         required=True,
         help="Path to the JSON configuration file, or a directory to scan for one",
     )
-    parser.add_argument("--root", default=None, help="Base directory for relative paths")
+    parser.add_argument(
+        "--root", default=None, help="Base directory for relative paths"
+    )
     args = parser.parse_args()
     try:
         run(args.config, args.root)

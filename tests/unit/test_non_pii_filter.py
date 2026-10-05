@@ -1,12 +1,9 @@
-import sys
-from pathlib import Path
-
-src_path = str(Path(__file__).resolve().parent.parent.parent / "src")
-if src_path not in sys.path:
-    sys.path.insert(0, src_path)
-
-import pytest
-from grievance_anonymization.main import is_non_pii_match, prepare_non_pii_rules, PiiHit, filter_non_pii_hits
+from grievance_anonymization.main import (
+    PiiHit,
+    filter_non_pii_hits,
+    is_non_pii_match,
+    prepare_non_pii_rules,
+)
 
 
 def test_non_pii_match_words():

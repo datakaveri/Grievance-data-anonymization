@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 import sys
-import os
-import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from grievance_anonymization.main import (
     process_text_string,
-    scan_text_line_by_line,
-    _load_ner_pipeline,
-    NER_MODELS,
-    _extract_raw_spans,
-    truecase_line,
-    merge_line_spans,
 )
 
 test_phrases = [

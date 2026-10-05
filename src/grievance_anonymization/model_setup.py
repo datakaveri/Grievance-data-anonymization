@@ -12,17 +12,18 @@
 # ║  Total disk needed: ~4.0 GB + pipeline dependencies                          ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
+import gc
+import os
 import subprocess
 import sys
-import os
 
-os.environ["HF_TOKEN"]               = os.getenv("HF_TOKEN", "").strip()
+os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN", "").strip()
 os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
 
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 if HF_TOKEN:
-    os.environ["HF_TOKEN"]                 = HF_TOKEN
-    os.environ["HUGGING_FACE_HUB_TOKEN"]  = HF_TOKEN
+    os.environ["HF_TOKEN"] = HF_TOKEN
+    os.environ["HUGGING_FACE_HUB_TOKEN"] = HF_TOKEN
 else:
     os.environ.pop("HF_TOKEN", None)
     os.environ.pop("HUGGING_FACE_HUB_TOKEN", None)
@@ -69,13 +70,14 @@ NER_MODEL_IDS = [
 def prefetch_models(max_workers: int = 3) -> int:
     """Download every runtime NER model into the HuggingFace cache, in parallel."""
     from concurrent.futures import ThreadPoolExecutor
-    from transformers import AutoTokenizer, AutoModelForTokenClassification
+
+    from transformers import AutoModelForTokenClassification, AutoTokenizer
 
     try:
         from grievance_anonymization.main import _HYBRID_NER_SPECS
     except ImportError:
         try:
-            from main import _HYBRID_NER_SPECS
+            from .main import _HYBRID_NER_SPECS
         except ImportError:
             from .main import _HYBRID_NER_SPECS
 
@@ -90,7 +92,10 @@ def prefetch_models(max_workers: int = 3) -> int:
         except Exception as exc:
             return model_id, exc
 
-    print(f"\n  Fetching {len(_HYBRID_NER_SPECS)} models with {max_workers} workers …", flush=True)
+    print(
+        f"\n  Fetching {len(_HYBRID_NER_SPECS)} models with {max_workers} workers …",
+        flush=True,
+    )
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(fetch, _HYBRID_NER_SPECS))
 
@@ -124,23 +129,31 @@ def main():
     print("\n[2] Installing PyTorch …")
     try:
         import torch as _t
+
         if _t.cuda.is_available():
             print(f"  ✓ PyTorch already present with CUDA ({_t.version.cuda}).")
         else:
             print("  ✓ PyTorch already present (CPU only).")
     except ImportError:
-        has_cuda = run(
-            "nvidia-smi", check=False,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        ).returncode == 0
+        has_cuda = (
+            run(
+                "nvidia-smi",
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
         if has_cuda:
             pip_install(
-                "torch", "torchvision",
+                "torch",
+                "torchvision",
                 extra_args=["--index-url", "https://download.pytorch.org/whl/cu121"],
             )
         else:
             pip_install(
-                "torch", "torchvision",
+                "torch",
+                "torchvision",
                 extra_args=["--index-url", "https://download.pytorch.org/whl/cpu"],
             )
 
@@ -169,7 +182,7 @@ def main():
     print("  NOTE: This requires ~4.0 GB disk and internet access.\n")
 
     try:
-        from transformers import AutoTokenizer, AutoModelForTokenClassification
+        from transformers import AutoModelForTokenClassification, AutoTokenizer
     except ImportError:
         print("  ✗ transformers not importable after install — check PyTorch.")
         sys.exit(1)
@@ -185,15 +198,16 @@ def main():
 
             tok = AutoTokenizer.from_pretrained(
                 model_id,
-                use_fast=False if "muril" in model_id.lower() or "indic" in model_id.lower() else True,
-                **hf_kwargs
+                use_fast=(
+                    False
+                    if "muril" in model_id.lower() or "indic" in model_id.lower()
+                    else True
+                ),
+                **hf_kwargs,
             )
-            mdl = AutoModelForTokenClassification.from_pretrained(
-                model_id,
-                **hf_kwargs
-            )
+            mdl = AutoModelForTokenClassification.from_pretrained(model_id, **hf_kwargs)
             del tok, mdl
-            import gc; gc.collect()
+            gc.collect()
             print(f"  ✓ Downloaded and cached: {model_id}")
         except Exception as e:
             print(f"  ✗ Download failed for {model_id}: {e}")
@@ -201,7 +215,9 @@ def main():
     print("\n" + "═" * 72)
     print("  ✅ Setup complete.")
     print("  Cache location: ~/.cache/huggingface/hub/")
-    print("  Next step:      python -m grievance_anonymization.main --input <folder_or_file>")
+    print(
+        "  Next step:      python -m grievance_anonymization.main --input <folder_or_file>"
+    )
     print("═" * 72 + "\n")
 
 

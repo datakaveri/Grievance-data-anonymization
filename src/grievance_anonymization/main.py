@@ -12,8 +12,8 @@ import argparse
 import gc
 import hashlib
 import json
-import multiprocessing as mp
 import os
+
 # Force PyTorch to hide CUDA devices at module load time to prevent CUDA driver probing errors
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 # Enable high-speed Rust-based multi-threaded HuggingFace downloads
@@ -26,7 +26,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import openpyxl
 import pandas as pd
@@ -85,7 +85,6 @@ def resolve_output_path(output_path: str) -> str:
     return str(p)
 
 
-
 def truecase_line(text: str) -> str:
     """
     Performs a 1-to-1 length-preserving title-casing transformation on words.
@@ -93,9 +92,11 @@ def truecase_line(text: str) -> str:
     without altering character indices.
     """
     return re.sub(r"\b[A-Za-z]+\b", lambda m: m.group(0).capitalize(), text)
+
+
 try:
-    from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
-    from presidio_analyzer.nlp_engine import NlpEngineProvider
+    from presidio_analyzer import AnalyzerEngine, RecognizerRegistry  # noqa: F401
+    from presidio_analyzer.nlp_engine import NlpEngineProvider  # noqa: F401
 
     _PRESIDIO_AVAILABLE = True
 except ImportError:
@@ -223,13 +224,23 @@ def parse_non_pii_entry(entry: Any) -> Optional[Dict[str, Optional[str]]]:
             return None
         if ":" in w and not w.startswith("http"):
             parts = w.split(":", 1)
-            return {"word": parts[0].strip().lower(), "entity": normalize_entity_label(parts[1])}
+            return {
+                "word": parts[0].strip().lower(),
+                "entity": normalize_entity_label(parts[1]),
+            }
         return {"word": w.lower(), "entity": None}
     elif isinstance(entry, dict):
-        w = str(entry.get("word") or entry.get("text") or entry.get("val") or "").strip()
+        w = str(
+            entry.get("word") or entry.get("text") or entry.get("val") or ""
+        ).strip()
         if not w:
             return None
-        ent = entry.get("entity") or entry.get("label") or entry.get("cat") or entry.get("type")
+        ent = (
+            entry.get("entity")
+            or entry.get("label")
+            or entry.get("cat")
+            or entry.get("type")
+        )
         return {"word": w.lower(), "entity": normalize_entity_label(ent)}
     elif isinstance(entry, (list, tuple)) and len(entry) >= 1:
         w = str(entry[0]).strip()
@@ -240,7 +251,9 @@ def parse_non_pii_entry(entry: Any) -> Optional[Dict[str, Optional[str]]]:
     return None
 
 
-def prepare_non_pii_rules(custom_list: Optional[List[Any]] = None) -> List[Dict[str, Optional[str]]]:
+def prepare_non_pii_rules(
+    custom_list: Optional[List[Any]] = None,
+) -> List[Dict[str, Optional[str]]]:
     """Combines default and user custom non-PII exclusion lists into a deduplicated rule set."""
     rules: List[Dict[str, Optional[str]]] = []
     seen = set()
@@ -538,9 +551,7 @@ def collect_files(input_path: str) -> List[str]:
     if p.is_file():
         if p.suffix.lower() in SUPPORTED:
             return [str(p)]
-        sys.exit(
-            f"[ERROR] Unsupported file type: {input_path}. Supported: {SUPPORTED}"
-        )
+        sys.exit(f"[ERROR] Unsupported file type: {input_path}. Supported: {SUPPORTED}")
     if p.is_dir():
         files = []
         for ext in SUPPORTED:
@@ -568,13 +579,9 @@ def detect_language(text: str) -> str:
     if not text or not text.strip():
         return "Unknown"
     text_clean = text.strip()
-    indic_counts = {
-        k: len(v.findall(text_clean)) for k, v in _INDIC_RANGES.items()
-    }
+    indic_counts = {k: len(v.findall(text_clean)) for k, v in _INDIC_RANGES.items()}
     latin_count = len(_LATIN_RE.findall(text_clean))
-    top_script = (
-        max(indic_counts, key=indic_counts.get) if indic_counts else None
-    )
+    top_script = max(indic_counts, key=indic_counts.get) if indic_counts else None
     if top_script and indic_counts[top_script] > 0:
         if (
             latin_count > 0
@@ -703,13 +710,11 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                 )
             )
 
-        for m in re.finditer(
-            r"\b[A-Z]{2}[\-\s]?\d{2,4}[\-\s]?\d{6,11}\b", line_str
-        ):
+        for m in re.finditer(r"\b[A-Z]{2}[\-\s]?\d{2,4}[\-\s]?\d{6,11}\b", line_str):
             val = m.group(0).strip()
-            if not re.match(
-                r"^[A-Z]{5}\d{4}[A-Z]$", val
-            ) and not re.match(r"^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$", val):
+            if not re.match(r"^[A-Z]{5}\d{4}[A-Z]$", val) and not re.match(
+                r"^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$", val
+            ):
                 hits.append(
                     PiiHit(
                         "Regex",
@@ -886,9 +891,7 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                 )
             )
 
-        for m in re.finditer(
-            r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", line_str
-        ):
+        for m in re.finditer(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b", line_str):
             hits.append(
                 PiiHit(
                     "Regex",
@@ -908,10 +911,7 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
             re.I,
         ):
             val = m.group(1).strip()
-            if (
-                "account" not in line_str.lower()
-                and "pension" not in line_str.lower()
-            ):
+            if "account" not in line_str.lower() and "pension" not in line_str.lower():
                 hits.append(
                     PiiHit(
                         "Regex",
@@ -1042,7 +1042,11 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
     elif "EMAIL" in lbl:
         if "@" in val:
             local, domain = val.split("@", 1)
-            mk = local[:2] + "*" * max(1, len(local) - 2) if len(local) > 2 else local[0] + "*"
+            mk = (
+                local[:2] + "*" * max(1, len(local) - 2)
+                if len(local) > 2
+                else local[0] + "*"
+            )
             anon = f"{mk}@{domain}"
         else:
             anon = "*****@***.com"
@@ -1061,9 +1065,17 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
             anon = parts[0][0] + ". " + " ".join(p[0] + "." for p in parts[1:])
         else:
             anon = "[NAME REDACTED]"
-        return ("Initial-Only Masking", anon, "First initial retained; rest reduced to initials")
+        return (
+            "Initial-Only Masking",
+            anon,
+            "First initial retained; rest reduced to initials",
+        )
     elif "DATE" in lbl or "DOB" in lbl:
-        return ("Date Generalization", "[DATE REDACTED]", "Full date replaced with placeholder")
+        return (
+            "Date Generalization",
+            "[DATE REDACTED]",
+            "Full date replaced with placeholder",
+        )
     elif "AGE" in lbl:
         m = re.search(r"\d+", val)
         if m:
@@ -1078,9 +1090,17 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
         anon = d[:3] + "XXX" if len(d) >= 6 else "XXXXXX"
         return ("Partial Masking", anon, "Last 3 digits of pincode masked")
     elif "LOCATION" in lbl or "LOC" in lbl:
-        return ("Generalization", "[LOCATION REDACTED]", "Location replaced with placeholder")
+        return (
+            "Generalization",
+            "[LOCATION REDACTED]",
+            "Location replaced with placeholder",
+        )
     elif "ORGANIZATION" in lbl or "ORG" in lbl:
-        return ("Generalization", "[ORGANIZATION REDACTED]", "Organization replaced with placeholder")
+        return (
+            "Generalization",
+            "[ORGANIZATION REDACTED]",
+            "Organization replaced with placeholder",
+        )
     else:
         anon = hashlib.sha256(val.encode()).hexdigest()[:16].upper()
         return ("One-Way Hashing", f"SHA256:{anon}", "Value hashed with SHA-256")
@@ -1092,6 +1112,7 @@ def anonymize_value(label: str, val: str) -> Tuple[str, str, str]:
 
 try:
     import torch as _torch
+
     if hasattr(_torch, "set_num_threads"):
         _torch.set_num_threads(min(4, os.cpu_count() or 4))
 
@@ -1119,7 +1140,9 @@ def _maybe_quantize(model, model_id: str):
         print(f"  [NER] Quantized {model_id} to INT8 (dynamic).", flush=True)
         return quantized
     except Exception as exc:
-        print(f"  [NER] INT8 quantization unavailable for {model_id}: {exc}", flush=True)
+        print(
+            f"  [NER] INT8 quantization unavailable for {model_id}: {exc}", flush=True
+        )
         return model
 
 
@@ -1129,10 +1152,16 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
     if not _TRANSFORMERS_AVAILABLE:
         return None
     try:
-        print(f"  [NER] Loading HuggingFace model weights for '{model_id}'...", flush=True)
+        print(
+            f"  [NER] Loading HuggingFace model weights for '{model_id}'...", flush=True
+        )
         hf_token = os.getenv("HF_TOKEN") or None
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token, use_fast=use_fast)
-        model = AutoModelForTokenClassification.from_pretrained(model_id, token=hf_token)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id, token=hf_token, use_fast=use_fast
+        )
+        model = AutoModelForTokenClassification.from_pretrained(
+            model_id, token=hf_token
+        )
         model.eval()
         model = _maybe_quantize(model, model_id)
         ner_pipe = _hf_pipeline(
@@ -1163,7 +1192,11 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
             prev == "."
             and start > 1
             and text[start - 2].isalpha()
-            and (start == 2 or text[start - 3] in STRICT_DELIMITERS or text[start - 3].isspace())
+            and (
+                start == 2
+                or text[start - 3] in STRICT_DELIMITERS
+                or text[start - 3].isspace()
+            )
         ):
             start -= 1
         else:
@@ -1185,14 +1218,18 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
 
 def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
     val = text[start:end]
-    match_prefix = re.match(r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val)
+    match_prefix = re.match(
+        r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+    )
     while match_prefix and match_prefix.end() > 0:
         cut = match_prefix.end()
         if cut >= len(val):
             break
         start += cut
         val = text[start:end]
-        match_prefix = re.match(r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val)
+        match_prefix = re.match(
+            r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+        )
 
     match_suffix = re.search(r"(\s+[a-zA-Z]|[\s:\-.,'\"/()]+)$", val)
     while match_suffix and match_suffix.start() < len(val):
@@ -1214,7 +1251,9 @@ def merge_line_spans(
     if not spans:
         return []
 
-    active_rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
+    active_rules = (
+        non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
+    )
     snapped_spans: List[Dict] = []
     for s in spans:
         cat = s["cat"]
@@ -1247,14 +1286,20 @@ def merge_line_spans(
     if not snapped_spans:
         return []
 
-    sorted_spans = sorted(snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"])))
+    sorted_spans = sorted(
+        snapped_spans, key=lambda x: (x["start"], -(x["end"] - x["start"]))
+    )
     same_cat_merged: List[Dict] = []
 
     for s in sorted_spans:
         target = None
         for m in same_cat_merged:
-            if m["cat"] == s["cat"] and (s["start"] <= m["end"] + 1 and m["start"] <= s["end"] + 1):
-                intervening = original_line[min(m["start"], s["start"]) : max(m["end"], s["end"])]
+            if m["cat"] == s["cat"] and (
+                s["start"] <= m["end"] + 1 and m["start"] <= s["end"] + 1
+            ):
+                intervening = original_line[
+                    min(m["start"], s["start"]) : max(m["end"], s["end"])
+                ]
                 if not any(d in intervening for d in ["/", "\\", ";", ":"]):
                     target = m
                     break
@@ -1264,7 +1309,9 @@ def merge_line_spans(
         else:
             target["start"] = min(target["start"], s["start"])
             target["end"] = max(target["end"], s["end"])
-            target_text, t_st, t_en = _clean_entity_text(original_line, target["start"], target["end"])
+            target_text, t_st, t_en = _clean_entity_text(
+                original_line, target["start"], target["end"]
+            )
             target["text"] = target_text
             target["start"] = t_st
             target["end"] = t_en
@@ -1378,7 +1425,9 @@ def _extract_raw_spans(
         results = _run_hf_pipe(pipe, line_str)
     except Exception:
         return []
-    return _parse_ner_items(results, line_str, min_score=min_score, model_name=model_name)
+    return _parse_ner_items(
+        results, line_str, min_score=min_score, model_name=model_name
+    )
 
 
 def _chunk_line_with_offsets(
@@ -1426,11 +1475,15 @@ def _extract_line_spans_chunked(
 
     token_count = len(tokenizer(line_str, add_special_tokens=True)["input_ids"])
     if token_count <= max_tokens:
-        return _extract_raw_spans(pipe, line_str, min_score=min_score, model_name=model_name)
+        return _extract_raw_spans(
+            pipe, line_str, min_score=min_score, model_name=model_name
+        )
 
     all_spans: List[Dict] = []
     for char_offset, chunk in _chunk_line_with_offsets(line_str, tokenizer, max_tokens):
-        chunk_spans = _extract_raw_spans(pipe, chunk, min_score=min_score, model_name=model_name)
+        chunk_spans = _extract_raw_spans(
+            pipe, chunk, min_score=min_score, model_name=model_name
+        )
         for s in chunk_spans:
             s["start"] += char_offset
             s["end"] += char_offset
@@ -1502,7 +1555,9 @@ def _infer_line_batch(
             short_tasks.append(task)
         else:
             try:
-                token_count = len(tokenizer(task.line_text, add_special_tokens=True)["input_ids"])
+                token_count = len(
+                    tokenizer(task.line_text, add_special_tokens=True)["input_ids"]
+                )
             except Exception:
                 token_count = max_tokens + 1
             if token_count <= max_tokens:
@@ -1594,7 +1649,9 @@ def _store_line_ner_results(
         + model_spans.get(NER_MODELS["IndicNER"][0], [])
         + model_spans.get(NER_MODELS["XLM_RoBERTa"][0], [])
     )
-    model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, line_text, non_pii_rules=rules)
+    model_line_ents[HYBRID_KEY] = merge_line_spans(
+        hybrid_spans, line_text, non_pii_rules=rules
+    )
 
     all_line_ents = set(
         (e.category, e.text) for ents in model_line_ents.values() for e in ents
@@ -1640,7 +1697,12 @@ NER_TORCH_THREADS = int(os.getenv("NER_TORCH_THREADS", "0"))
 _HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
     (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.50),
     (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.65),
-    (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.50),
+    (
+        NER_MODELS["XLM_RoBERTa"][0],
+        "Babelscape/wikineural-multilingual-ner",
+        True,
+        0.50,
+    ),
 ]
 
 # # NEW THRESHOLDS (Set to 0.0 for now as requested):
@@ -1660,7 +1722,9 @@ def run_corpus_line_ner(
     if not lines:
         return []
     if not _TRANSFORMERS_AVAILABLE:
-        print("  [NER] transformers not installed — skipping model inference.", flush=True)
+        print(
+            "  [NER] transformers not installed — skipping model inference.", flush=True
+        )
         return [[] for _ in lines]
 
     batch_size = max(1, batch_size)
@@ -1672,7 +1736,12 @@ def run_corpus_line_ner(
         _torch.set_num_threads(NER_TORCH_THREADS)
     try:
         return _corpus_ner_passes(
-            lines, order, spans_per_line, batch_size, release_models, non_pii_rules=non_pii_rules
+            lines,
+            order,
+            spans_per_line,
+            batch_size,
+            release_models,
+            non_pii_rules=non_pii_rules,
         )
     finally:
         _torch.set_num_threads(previous_threads)
@@ -1705,7 +1774,11 @@ def _corpus_ner_passes(
             chunk = order[offset : offset + batch_size]
             tasks = [LineTask(doc_id=0, line_no=i, line_text=lines[i]) for i in chunk]
             for result in _infer_line_batch(
-                pipe, tasks, min_score, label, batch_size=tensor_batch,
+                pipe,
+                tasks,
+                min_score,
+                label,
+                batch_size=tensor_batch,
             ):
                 if result.error:
                     print(
@@ -1738,14 +1811,19 @@ def run_line_by_line_ner(
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
     if not _TRANSFORMERS_AVAILABLE:
-        print("  [NER] transformers not installed — skipping model inference.", flush=True)
+        print(
+            "  [NER] transformers not installed — skipping model inference.", flush=True
+        )
         return
 
     print(f"  [NER] Loading HuggingFace models on {_NER_DEVICE_STR} …", flush=True)
-    hiner_pipe = _load_ner_pipeline("cfilt/HiNER-original-muril-base-cased", use_fast=False)
+    hiner_pipe = _load_ner_pipeline(
+        "cfilt/HiNER-original-muril-base-cased", use_fast=False
+    )
     indicner_pipe = _load_ner_pipeline("ai4bharat/IndicNER", use_fast=False)
-    bert_pipe = None
-    xlm_pipe = _load_ner_pipeline("Babelscape/wikineural-multilingual-ner", use_fast=True)
+    xlm_pipe = _load_ner_pipeline(
+        "Babelscape/wikineural-multilingual-ner", use_fast=True
+    )
 
     pipes = {
         NER_MODELS["HiNER"][0]: (hiner_pipe, 0.50),
@@ -1774,7 +1852,6 @@ def run_line_by_line_ner(
         return
 
     expected_per_line = len(model_labels)
-    total_expected = len(tasks) * expected_per_line
     bound = max(8, queue_size)
     in_queues = {lbl: Queue(maxsize=bound) for lbl in model_labels}
     result_queue: Queue = Queue(maxsize=max(bound * expected_per_line, bound))
@@ -1870,7 +1947,10 @@ def scan_records_pii(
     non_pii_rules: Optional[List[Dict[str, Optional[str]]]] = None,
 ):
     rules = non_pii_rules if non_pii_rules is not None else prepare_non_pii_rules()
-    print(f"\n[PII] Running Regex & Presidio PII scan on {len(records)} document(s)...", flush=True)
+    print(
+        f"\n[PII] Running Regex & Presidio PII scan on {len(records)} document(s)...",
+        flush=True,
+    )
     total_pii = 0
     for rec in records:
         regex_hits, presidio_hits = full_pii_scan(rec.raw_text)
@@ -1882,7 +1962,6 @@ def scan_records_pii(
             flush=True,
         )
     print(f"✓ PII scanning complete. Total PII hits: {total_pii}", flush=True)
-
 
 
 def analyze_records(
@@ -1901,7 +1980,9 @@ def analyze_records(
         except BaseException as exc:
             pii_errors.append(exc)
 
-    pii_thread = threading.Thread(target=_pii_worker, name="pii-dispatcher", daemon=True)
+    pii_thread = threading.Thread(
+        target=_pii_worker, name="pii-dispatcher", daemon=True
+    )
     pii_thread.start()
     run_line_by_line_ner(
         records,
@@ -2078,8 +2159,10 @@ def build_csv(
         pii_types = ", ".join(sorted({h.label for h in all_hits})) or "None"
 
         hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
-        hy_persons = list(dict.fromkeys(p for lres in hybrid_lines for p in lres.persons))
-        hy_locs = list(dict.fromkeys(l for lres in hybrid_lines for l in lres.locs))
+        hy_persons = list(
+            dict.fromkeys(p for lres in hybrid_lines for p in lres.persons)
+        )
+        hy_locs = list(dict.fromkeys(loc for lres in hybrid_lines for loc in lres.locs))
         hy_orgs = list(dict.fromkeys(o for lres in hybrid_lines for o in lres.orgs))
 
         s1_rows.append(
@@ -2124,7 +2207,11 @@ def build_csv(
         else:
             lines = rec.raw_text.splitlines()
             for h in rec.pii_hits:
-                line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+                line_text = (
+                    lines[h.line_no - 1]
+                    if 0 < h.line_no <= len(lines)
+                    else rec.raw_text
+                )
                 s2_rows.append(
                     {
                         "File": rec.filename,
@@ -2178,7 +2265,9 @@ def build_csv(
                     lres = rec.line_ners[model_lbl][idx]
                     row[f"{model_lbl}_Predicted_Type"] = lres.predicted_type
                     row[f"{model_lbl}_Extracted_Text"] = lres.extracted_text
-                    row[f"{model_lbl}_Missed_Entities"] = " | ".join(lres.missed) if lres.missed else "None"
+                    row[f"{model_lbl}_Missed_Entities"] = (
+                        " | ".join(lres.missed) if lres.missed else "None"
+                    )
                     row[f"{model_lbl}_Status"] = (
                         "✓ Detected"
                         if (lres.persons or lres.locs or lres.orgs)
@@ -2191,7 +2280,9 @@ def build_csv(
         lines = rec.raw_text.splitlines()
 
         for h in rec.pii_hits:
-            line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+            line_text = (
+                lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+            )
             s4_rows.append(
                 {
                     "File": rec.filename,
@@ -2228,7 +2319,11 @@ def build_csv(
                 display_label = (
                     "Person Name"
                     if ent.category == "PERSON"
-                    else ("Location / City" if ent.category == "LOCATION" else "Organization")
+                    else (
+                        "Location / City"
+                        if ent.category == "LOCATION"
+                        else "Organization"
+                    )
                 )
 
                 s4_rows.append(
@@ -2268,7 +2363,6 @@ def build_csv(
     print(f"    • Main CSV: {main_csv_path}", flush=True)
 
 
-
 _C = {
     "header_bg": "1F4E79",
     "header_fg": "FFFFFF",
@@ -2281,8 +2375,7 @@ _C = {
     "age_cell": "F3E5F5",
 }
 _FILLS = {
-    k: PatternFill(start_color=v, end_color=v, fill_type="solid")
-    for k, v in _C.items()
+    k: PatternFill(start_color=v, end_color=v, fill_type="solid") for k, v in _C.items()
 }
 _H_FONT = Font(color=_C["header_fg"], bold=True, size=10)
 _WRAP = Alignment(wrap_text=True, vertical="top")
@@ -2305,9 +2398,7 @@ def _auto_width(ws, max_w: int = 55):
         ws.column_dimensions[col_letter].width = min(best + 4, max_w)
 
 
-def build_excel(
-    records: List[FileRecord], output_path: str, presidio_available: bool
-):
+def build_excel(records: List[FileRecord], output_path: str, presidio_available: bool):
     output_path = resolve_output_path(output_path)
     all_model_labels = [
         NER_MODELS["HiNER"][0],
@@ -2326,8 +2417,10 @@ def build_excel(
         pii_types = ", ".join(sorted({h.label for h in all_hits})) or "None"
 
         hybrid_lines = rec.line_ners.get(HYBRID_KEY, [])
-        hy_persons = list(dict.fromkeys(p for lres in hybrid_lines for p in lres.persons))
-        hy_locs = list(dict.fromkeys(l for lres in hybrid_lines for l in lres.locs))
+        hy_persons = list(
+            dict.fromkeys(p for lres in hybrid_lines for p in lres.persons)
+        )
+        hy_locs = list(dict.fromkeys(loc for lres in hybrid_lines for loc in lres.locs))
         hy_orgs = list(dict.fromkeys(o for lres in hybrid_lines for o in lres.orgs))
 
         s1_rows.append(
@@ -2372,7 +2465,11 @@ def build_excel(
         else:
             lines = rec.raw_text.splitlines()
             for h in rec.pii_hits:
-                line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+                line_text = (
+                    lines[h.line_no - 1]
+                    if 0 < h.line_no <= len(lines)
+                    else rec.raw_text
+                )
                 s2_rows.append(
                     {
                         "File": rec.filename,
@@ -2426,7 +2523,9 @@ def build_excel(
                     lres = rec.line_ners[model_lbl][idx]
                     row[f"{model_lbl}_Predicted_Type"] = lres.predicted_type
                     row[f"{model_lbl}_Extracted_Text"] = lres.extracted_text
-                    row[f"{model_lbl}_Missed_Entities"] = " | ".join(lres.missed) if lres.missed else "None"
+                    row[f"{model_lbl}_Missed_Entities"] = (
+                        " | ".join(lres.missed) if lres.missed else "None"
+                    )
                     row[f"{model_lbl}_Status"] = (
                         "✓ Detected"
                         if (lres.persons or lres.locs or lres.orgs)
@@ -2439,7 +2538,9 @@ def build_excel(
         lines = rec.raw_text.splitlines()
 
         for h in rec.pii_hits:
-            line_text = lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+            line_text = (
+                lines[h.line_no - 1] if 0 < h.line_no <= len(lines) else rec.raw_text
+            )
             s4_rows.append(
                 {
                     "File": rec.filename,
@@ -2476,7 +2577,11 @@ def build_excel(
                 display_label = (
                     "Person Name"
                     if ent.category == "PERSON"
-                    else ("Location / City" if ent.category == "LOCATION" else "Organization")
+                    else (
+                        "Location / City"
+                        if ent.category == "LOCATION"
+                        else "Organization"
+                    )
                 )
 
                 s4_rows.append(
@@ -2654,17 +2759,29 @@ def parse_args():
 
 def main():
     print("\n" + "═" * 78, flush=True)
-    print("╔══════════════════════════════════════════════════════════════════════════════╗", flush=True)
-    print("║  MAIN.PY — Multi-Format PII Detection & NER Comparison Pipeline             ║", flush=True)
-    print("║  Supports: .txt, .doc, .docx, .html, .json, .csv                            ║", flush=True)
-    print("╚══════════════════════════════════════════════════════════════════════════════╝", flush=True)
+    print(
+        "╔══════════════════════════════════════════════════════════════════════════════╗",
+        flush=True,
+    )
+    print(
+        "║  MAIN.PY — Multi-Format PII Detection & NER Comparison Pipeline             ║",
+        flush=True,
+    )
+    print(
+        "║  Supports: .txt, .doc, .docx, .html, .json, .csv                            ║",
+        flush=True,
+    )
+    print(
+        "╚══════════════════════════════════════════════════════════════════════════════╝",
+        flush=True,
+    )
     print("═" * 78, flush=True)
 
     args = parse_args()
 
     if args.config is not None:
-        from grievance_anonymization.batch_pipeline import run as run_batch
         from grievance_anonymization.batch_pipeline import BatchError
+        from grievance_anonymization.batch_pipeline import run as run_batch
 
         try:
             run_batch(args.config)
@@ -2684,16 +2801,25 @@ def main():
                 if isinstance(loaded, list):
                     custom_non_pii.extend(loaded)
         except Exception as exc:
-            print(f"  [WARN] Could not read non-PII file {args.non_pii_file}: {exc}", flush=True)
+            print(
+                f"  [WARN] Could not read non-PII file {args.non_pii_file}: {exc}",
+                flush=True,
+            )
 
     if args.non_pii_list:
         try:
             if args.non_pii_list.strip().startswith("["):
                 custom_non_pii.extend(json.loads(args.non_pii_list))
             else:
-                custom_non_pii.extend(item.strip() for item in args.non_pii_list.split(",") if item.strip())
+                custom_non_pii.extend(
+                    item.strip()
+                    for item in args.non_pii_list.split(",")
+                    if item.strip()
+                )
         except Exception:
-            custom_non_pii.extend(item.strip() for item in args.non_pii_list.split(",") if item.strip())
+            custom_non_pii.extend(
+                item.strip() for item in args.non_pii_list.split(",") if item.strip()
+            )
 
     rules = prepare_non_pii_rules(custom_non_pii)
     presidio_ok = False
@@ -2737,7 +2863,10 @@ def main():
                 raw_text=raw,
             )
         )
-        print(f"  ➜ Loaded '{os.path.basename(fp)}' | Format: {ftype.upper()} | Language: {lang}", flush=True)
+        print(
+            f"  ➜ Loaded '{os.path.basename(fp)}' | Format: {ftype.upper()} | Language: {lang}",
+            flush=True,
+        )
 
     if not records:
         sys.exit("[ERROR] No readable documents found after extraction.")
@@ -2748,13 +2877,19 @@ def main():
         queue_size=max(8, args.queue_size),
         non_pii_rules=rules,
     )
-    print("\n[OUTPUT] Writing Excel, JSON, and CSV reports to output folder...", flush=True)
+    print(
+        "\n[OUTPUT] Writing Excel, JSON, and CSV reports to output folder...",
+        flush=True,
+    )
     build_excel(records, args.output, presidio_ok)
     build_json(records, args.output)
     build_csv(records, args.output, presidio_ok)
 
     print("\n" + "═" * 78, flush=True)
-    print("✅ PII & NER Anonymization Pipeline execution completed successfully.", flush=True)
+    print(
+        "✅ PII & NER Anonymization Pipeline execution completed successfully.",
+        flush=True,
+    )
     print("═" * 78 + "\n", flush=True)
 
 
