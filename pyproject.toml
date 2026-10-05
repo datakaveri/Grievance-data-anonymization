@@ -59,6 +59,13 @@ python_files = ["test_*.py"]
 pythonpath = ["src"]
 addopts = "-v --cov=src/grievance_anonymization --cov-report=term-missing"
 
+[tool.coverage.run]
+omit = [
+    "src/grievance_anonymization/model_setup.py",
+    "src/grievance_anonymization/batch_pipeline.py",
+]
+
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
