@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -17,11 +19,13 @@ import pandas as pd
 
 try:
     from main import (
+        ner_false_positive_reason,
+        ner_term_key,
+        word_casing_stats,
         NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
         full_pii_scan,
-        merge_pii_hits,
         run_corpus_line_ner,
         _tensor_batch_size,
         _TRANSFORMERS_AVAILABLE,
@@ -30,11 +34,13 @@ try:
 except ModuleNotFoundError:  # Supports `python -m app.batch_pipeline` too.
     from .profiling import NULL_PROFILER, Profiler
     from .main import (
+        ner_false_positive_reason,
+        ner_term_key,
+        word_casing_stats,
         NER_CORPUS_BATCH_SIZE,
         PiiHit,
         detect_language,
         full_pii_scan,
-        merge_pii_hits,
         run_corpus_line_ner,
         _tensor_batch_size,
         _TRANSFORMERS_AVAILABLE,
@@ -164,6 +170,34 @@ def _resolve_source_input(dataset: dict[str, Any], work_root: Path) -> Path:
     return candidates[0]
 
 
+_HTML_ENTITY = re.compile(r"&(?:#\d+|#[xX][0-9a-fA-F]+|[A-Za-z]+);")
+# Devanagari repairs for text that went through a legacy-font (Kruti Dev style)
+# converter, e.g. "शिक्ष़्ाा" for "शिक्षा". Each only removes a sign Unicode does
+# not allow in that position, so valid text is never changed:
+_STRAY_NUKTA = re.compile(r"(?<![कखगजडढफयनरळ])\u093c")  # nukta on a letter that takes none
+_VIRAMA_BEFORE_SIGN = re.compile(r"\u094d(?=[\u093c\u093e-\u094d])")  # virama + vowel sign
+_REPEATED_SIGN = re.compile(r"([\u093e-\u094c])\1+")  # the same vowel sign twice
+
+
+def _normalize_source_text(value: Any) -> Any:
+    """Undo export artefacts in a free-text cell before anything reads it.
+
+    The grievance export stores text HTML-escaped ("Government&#039;s",
+    "&amp;"), and some Hindi arrived through a broken legacy-font conversion.
+    Both reach the models and the output as junk; neither is anonymisation, so
+    this is switchable with free_text_anonymization.normalize_source_text.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if "&" in value and _HTML_ENTITY.search(value):
+        value = html.unescape(value)
+    if "\u093c" in value or "\u094d" in value or _REPEATED_SIGN.search(value):
+        value = _STRAY_NUKTA.sub("", value)
+        value = _VIRAMA_BEFORE_SIGN.sub("", value)
+        value = _REPEATED_SIGN.sub(r"\1", value)
+    return value
+
+
 def _write_table(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Write beside the destination and replace it only after the whole batch succeeds.
@@ -176,9 +210,8 @@ def _write_table(df: pd.DataFrame, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _cell_hits(text: str) -> list[PiiHit]:
-    regex_hits, presidio_hits = full_pii_scan(text)
-    return merge_pii_hits(regex_hits, presidio_hits)
+def _cell_hits(text: str, scan_options: dict[str, Any] | None = None) -> list[PiiHit]:
+    return full_pii_scan(text, **(scan_options or {}))
 
 
 def _line_bases(text: str) -> list[int]:
@@ -195,11 +228,13 @@ def _line_bases(text: str) -> list[int]:
     return bases
 
 
-def _absolute_hits(text: str) -> list[tuple[int, int, PiiHit]]:
+def _absolute_hits(
+    text: str, scan_options: dict[str, Any] | None = None
+) -> list[tuple[int, int, PiiHit]]:
     """Convert line-relative hit offsets into cell-relative zero-based offsets."""
     bases = _line_bases(text)
     result = []
-    for hit in _cell_hits(text):
+    for hit in _cell_hits(text, scan_options):
         if hit.line_no < 1 or hit.line_no > len(bases):
             continue
         base = bases[hit.line_no - 1]
@@ -254,13 +289,19 @@ def _hardcoded_policy(label: str, value: str, column: str, salts: dict[str, str]
 # paying a model pass for them; the corpus builder below mirrors that.
 _MIN_NER_LINE_CHARS = 3
 
+# A line that is one whitespace-free token carrying a digit, a file extension or
+# a URL/email shape is a machine string (attachment name, reference code, link),
+# not language: the NER models only guess at it, and tagged a system filename
+# like "CRFBD17746178970.pdf" as an ORGANIZATION. Regex detection still scans it.
+_MACHINE_TOKEN = re.compile(r"\S*\d\S*|\S+\.[A-Za-z0-9]{2,5}|\S+://\S+|\S+@\S+")
+
 
 def _ner_lines(text: str) -> list[tuple[int, str]]:
     """(line index, stripped line) for the lines worth sending to the models."""
     result = []
     for line_idx, line in enumerate(text.splitlines()):
         stripped = line.strip()
-        if len(stripped) >= _MIN_NER_LINE_CHARS:
+        if len(stripped) >= _MIN_NER_LINE_CHARS and not _MACHINE_TOKEN.fullmatch(stripped):
             result.append((line_idx, stripped))
     return result
 
@@ -293,6 +334,8 @@ def _build_ner_index(
     batch_size: int,
     profiler=None,
     attribute: bool = False,
+    allow_terms: list[str] | None = None,
+    casing: dict[str, list[int]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Run hybrid NER once over every distinct line in the job.
 
@@ -305,6 +348,10 @@ def _build_ner_index(
 
     With `attribute` set, each hit also carries a "models" list naming the models
     that fired on it — the merged entities alone cannot say.
+
+    Entities that ner_false_positive_reason clears (titles, function words,
+    everyday vocabulary, `allow_terms`) are left out. Its casing evidence comes
+    from `texts` themselves unless `casing` is given.
 
     Returns {text: [hit dicts with cell-relative offsets]}.
     """
@@ -331,6 +378,23 @@ def _build_ner_index(
         spans_by_model=spans_by_model,
         profiler=profiler,
     )
+
+    with profiler.step("filter false positives", parent="ner"):
+        if casing is None:
+            casing = word_casing_stats(texts)
+        allow_keys = frozenset(ner_term_key(t) for t in allow_terms or [])
+        dropped: dict[str, int] = {}
+        for line_id, line in enumerate(corpus):
+            kept = []
+            for entity in entities[line_id]:
+                reason = ner_false_positive_reason(entity, line, allow_keys, casing)
+                if reason is None:
+                    kept.append(entity)
+                else:
+                    dropped[reason] = dropped.get(reason, 0) + 1
+            entities[line_id] = kept
+    if dropped:
+        print(f"[Batch] NER entities cleared as not personal: {dropped}", flush=True)
 
     # Flatten to per-line (label, span) pairs once, rather than per entity.
     per_line_spans: list[list[tuple[str, dict[str, Any]]]] = []
@@ -374,6 +438,7 @@ def _sanitize(
     salts: dict[str, str],
     ner_hits: list[dict[str, Any]],
     include_values: bool = False,
+    scan_options: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(text, str) or not text:
         return text, []
@@ -381,7 +446,7 @@ def _sanitize(
     language = detect_language(text)
     detections = [
         {"start": start, "end": end, "label": hit.label, "source": hit.source, "confidence": hit.confidence, "value": hit.value}
-        for start, end, hit in _absolute_hits(text)
+        for start, end, hit in _absolute_hits(text, scan_options)
         if hit.confidence >= minimum_confidence
     ]
     detections.extend(item for item in ner_hits if item["confidence"] >= minimum_confidence)
@@ -468,12 +533,18 @@ def _debug_settings(settings: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(debug, dict):
         debug = {}
     enabled = bool(debug.get("enabled", False)) or os.getenv("ANON_DEBUG", "").strip() in {"1", "true", "yes"}
+    # Default report paths sit next to this config's audit (or staged CSV) and
+    # share its stem, so configs that write distinct outputs also get distinct
+    # debug reports instead of overwriting one shared output/debug_*.json.
+    base = Path(settings.get("audit_output_path") or settings.get("staged_input_path") or "output/debug")
+    prefix = str(base.with_suffix("")) + "."
     return {
         "enabled": enabled,
         "include_values": bool(debug.get("include_values", True)),
-        "profile_output_path": debug.get("profile_output_path", "output/debug_profile.json"),
-        "attribution_output_path": debug.get("attribution_output_path", "output/debug_detections.json"),
-        "attribution_text_path": debug.get("attribution_text_path", "output/debug_detections.txt"),
+        "profile_output_path": debug.get("profile_output_path", prefix + "debug_profile.json"),
+        "attribution_output_path": debug.get("attribution_output_path", prefix + "debug_detections.json"),
+        "attribution_text_path": debug.get("attribution_text_path", prefix + "debug_detections.txt"),
+        "ner_terms_path": debug.get("ner_terms_path", prefix + "debug_ner_terms.json"),
         "max_rows": int(debug.get("max_rows", 0)),
     }
 
@@ -481,6 +552,30 @@ def _debug_settings(settings: dict[str, Any]) -> dict[str, Any]:
 def _model_short_name(label: str) -> str:
     """'HiNER (IIT Bombay / MuRIL)' -> 'HiNER', for readable per-row lines."""
     return label.split(" (")[0].strip()
+
+
+def _write_ner_terms(audit: list[dict[str, Any]], path: Path, top: int = 300) -> None:
+    """Most-redacted model-detected strings, to curate `ner_allow_terms` from.
+
+    Local terms that are not personal ("ATR", "Jan Samvaad") rise to the top
+    because they recur across many rows. So do officials' names, which must NOT
+    be allow-listed: read the list, do not copy it. Debug-only, since it holds
+    detected text.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for item in audit:
+        if item.get("source") == "Hybrid NER" and "detected_text" in item:
+            key = (item["label"], item["detected_text"].strip())
+            counts[key] = counts.get(key, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:top]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        json.dump(
+            [{"text": text, "label": label, "redactions": n, "allow_key": ner_term_key(text)}
+             for (label, text), n in ranked],
+            fh, indent=2, ensure_ascii=False,
+        )
+    print(f"[Batch] Wrote NER term frequencies: {path}")
 
 
 def _write_attribution(
@@ -607,6 +702,20 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     if missing:
         raise BatchError(f"Configured columns are missing from input: {missing}")
 
+    for key in ("reference_keywords", "strong_reference_keywords", "ner_allow_terms", "ner_deny_terms"):
+        value = settings.get(key)
+        if value is not None and (
+            not isinstance(value, list) or not all(isinstance(k, str) for k in value)
+        ):
+            raise BatchError(f"free_text_anonymization.{key} must be a list of strings")
+    scan_options = {
+        key: settings[key]
+        for key in ("reference_keywords", "strong_reference_keywords")
+        if key in settings
+    }
+    if settings.get("ner_deny_terms"):
+        scan_options["deny_terms"] = settings["ner_deny_terms"]
+    ner_allow_terms = settings.get("ner_allow_terms") or []
     minimum_confidence = float(settings.get("minimum_confidence", 0.0))
     batch_size = int(settings.get("ner_batch_size", NER_CORPUS_BATCH_SIZE))
     audit: list[dict[str, Any]] = []
@@ -615,6 +724,12 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     column_hash_salts: dict[str, str] = {}
     column_locs = {column: df.columns.get_loc(column) for column in columns}
     started = time.time()
+
+    if settings.get("normalize_source_text", True):
+        with profiler.step("normalize source text"):
+            for column in columns:
+                loc = column_locs[column]
+                df.isetitem(loc, [_normalize_source_text(v) for v in df.iloc[:, loc].tolist()])
 
     # Pass 1 — collect the distinct values we actually have to anonymize.
     # Grievance free text repeats heavily (four in five complaint bodies in one real
@@ -639,7 +754,13 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
     # Pass 2 — one NER sweep over the whole corpus, then apply the policy.
     with profiler.step("ner") as ner_step:
         ner_index = (
-            _build_ner_index(texts, batch_size, profiler=profiler, attribute=debug["enabled"])
+            _build_ner_index(
+                texts,
+                batch_size,
+                profiler=profiler,
+                attribute=debug["enabled"],
+                allow_terms=ner_allow_terms,
+            )
             if texts else {}
         )
         ner_step.detail.update(distinct_values=len(texts))
@@ -663,6 +784,7 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
                         column_hash_salts,
                         ner_index.get(value, []),
                         include_values=debug["enabled"] and debug["include_values"],
+                        scan_options=scan_options,
                     )
                 sanitized, accepted = sanitized_cache[key]
                 if accepted:
@@ -700,12 +822,14 @@ def run(config_path: str, root: str | None = None) -> dict[str, Any]:
             audit_path = _path(audit_path_value, work_root)
             audit_path.parent.mkdir(parents=True, exist_ok=True)
             with audit_path.open("w", encoding="utf-8") as fh:
-                json.dump({"rows": len(df), "columns": list(df.columns), "detections": audit, "failures": failures}, fh, indent=2)
+                json.dump({"rows": len(df), "columns": list(df.columns), "detections": audit, "failures": failures}, fh, indent=2, ensure_ascii=False)
     print(f"[Batch] Wrote staged dataset: {staged}")
     print(f"[Batch] Rows: {len(df)}; detections: {len(audit)}; failures: {len(failures)}")
 
     if debug["enabled"]:
         with profiler.step("write debug reports"):
+            if debug["include_values"]:
+                _write_ner_terms(audit, _path(debug["ner_terms_path"], work_root))
             _write_attribution(
                 audit,
                 _path(debug["attribution_output_path"], work_root),

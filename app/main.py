@@ -2,8 +2,8 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║  PIPELINE.PY — Multi-Format PII Detection & NER Comparison Pipeline          ║
 # ║  Supports: .txt, .doc, .docx, .html, .json, .csv (single file or folder)     ║
-# ║  PII Detection: Regex + Presidio (overlaps NER via dispatcher thread)        ║
-# ║  NER: Queue-driven parallel HiNER / IndicNER / XLM-R (+ optional BERT)       ║
+# ║  PII Detection: Regex only                                                   ║
+# ║  NER: Queue-driven parallel IndicNER / XLM-RoBERTa Davlan (pull cached files)║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ import re
 import sys
 import threading
 import time
+import unicodedata
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Dict, List, Optional, Tuple
+from functools import lru_cache
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import openpyxl
 import pandas as pd
@@ -63,25 +65,23 @@ try:
 except ImportError:
     pass
 
-DEFAULT_INPUT_PATH = "/home/gogul/Documents/Grievance-data-anonymization/app/data/sample_complaint.txt"
+DEFAULT_INPUT_PATH = "/home/azureuser/anon/data/sample_haryana.json"  # set via config or CLI --input
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
 DEFAULT_HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+# Loading a .bin checkpoint (HiNER, IndicNER) otherwise spawns a background
+# thread that queries the Hub to open a safetensors-conversion PR — a network
+# call on every run, even from a warm cache, and a 401 on gated repos.
+os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
 
 
 def truecase_line(text: str) -> str:
     """
+    WE ARE NOT USING THIS NOW
     Performs a 1-to-1 length-preserving title-casing transformation on words.
     Enables cased Transformer models to recognize entities in ALL-CAPS or all-lowercase text
-    without altering character indices.
+    without altering character indices. 
     """
     return re.sub(r"\b[A-Za-z]+\b", lambda m: m.group(0).capitalize(), text)
-try:
-    from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
-    from presidio_analyzer.nlp_engine import NlpEngineProvider
-
-    _PRESIDIO_AVAILABLE = True
-except ImportError:
-    _PRESIDIO_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OPTIONAL IMPORTS — Document reading libs
@@ -103,22 +103,16 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # DEFAULT PATHS & CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
-DEFAULT_INPUT_PATH = "/home/gogul/Documents/Grievance-data-anonymization/app/data/sample_complaint.txt"
 DEFAULT_OUTPUT_PATH = "pii_ner_report.xlsx"
 
 NER_MODELS: Dict[str, Tuple[str, str]] = {
-    "HiNER": (
-        "HiNER (IIT Bombay / MuRIL)",
-        "cfilt/HiNER-original-muril-base-cased",
-    ),
     "IndicNER": ("IndicNER (AI4Bharat / Public)", "ai4bharat/IndicNER"),
-    "BERT_Base_NER": ("BERT-Base-NER (English)", "dslim/bert-base-NER"),
     "XLM_RoBERTa": (
         "XLM-RoBERTa (Multilingual)",
-        "Babelscape/wikineural-multilingual-ner",
+        "Davlan/xlm-roberta-base-ner-hrl",
     ),
 }
-HYBRID_KEY = "Hybrid (HiNER + IndicNER + XLM-RoBERTa)"
+HYBRID_KEY = "Hybrid (IndicNER + XLM-RoBERTa)"
 
 # Queue-driven NER (see NER_Parallel_Pipeline_Short_Architecture.docx):
 # mini-batches of 16–32 lines cut tokenizer overhead; bounded queues apply backpressure.
@@ -147,6 +141,11 @@ PII_DISPLAY_NAMES: Dict[str, str] = {
     "IFSC_Code": "IFSC Code",
     "Pincode": "ZIP / Pin Code",
     "Age": "Age",
+    "Reference_Number": "Reference Number",
+    "ID_Number": "Identifier",
+    "GSTIN": "GSTIN",
+    "ABHA": "ABHA Health ID",
+    "UPI_ID": "UPI ID",
 }
 
 
@@ -171,6 +170,8 @@ class NerEntity:
     word_no: int = 0
     start_char: int = 0
     end_char: int = 0
+    # Models whose raw spans make up this entity (any category), for agreement checks.
+    models: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -443,94 +444,6 @@ def detect_language(text: str) -> str:
     return "Unknown"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PRESIDIO INTEGRATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-_presidio_engine: Optional[object] = None
-
-
-def _get_presidio_engine():
-    # PRESIDIO MODEL (COMMENTED OUT - uncomment to re-enable Presidio engine)
-    # global _presidio_engine
-    # if _presidio_engine is not None:
-    #     return _presidio_engine
-    # if not _PRESIDIO_AVAILABLE:
-    #     return None
-    # try:
-    #     model_name = "en_core_web_lg"
-    #     try:
-    #         import spacy
-    # 
-    #         spacy.load(model_name)
-    #     except Exception:
-    #         model_name = "en_core_web_sm"
-    # 
-    #     configuration = {
-    #         "nlp_engine_name": "spacy",
-    #         "models": [{"lang_code": "en", "model_name": model_name}],
-    #     }
-    #     provider = NlpEngineProvider(nlp_configuration=configuration)
-    #     nlp_engine = provider.create_engine()
-    #     _presidio_engine = AnalyzerEngine(nlp_engine=nlp_engine)
-    #     return _presidio_engine
-    # except Exception as e:
-    #     print(f"  [WARN] Could not initialize Presidio: {e}", flush=True)
-    #     return None
-    return None
-
-
-_PRESIDIO_LABEL_MAP = {
-    "EMAIL_ADDRESS": "Email",
-    "PHONE_NUMBER": "Phone_Number",
-    "CREDIT_CARD": "Credit_Card",
-    "IBAN_CODE": "Bank_Account",
-    "DATE_TIME": "Date",
-    "IP_ADDRESS": "IP_Address",
-    "MEDICAL_LICENSE": "Medical_UHID",
-}
-
-
-def _run_presidio_on_line(line: str, engine) -> List[PiiHit]:
-    hits: List[PiiHit] = []
-    if not line.strip():
-        return hits
-    try:
-        results = engine.analyze(text=line, language="en")
-        for r in results:
-            internal_label = _PRESIDIO_LABEL_MAP.get(r.entity_type)
-            if internal_label is None or r.score < 0.6:
-                continue
-            value = line[r.start : r.end].strip()
-
-            if not value or re.match(r"^\d{1,4}$", value):
-                continue
-
-            if internal_label == "Date" and re.search(
-                r"\b(?:year|years|aged?|old)\b", value, re.I
-            ):
-                continue
-
-            word_no = get_word_number(line, r.start)
-            start_char = r.start + 1
-            end_char = r.end
-            display = PII_DISPLAY_NAMES.get(internal_label, internal_label)
-
-            hits.append(
-                PiiHit(
-                    source="Presidio",
-                    label=internal_label,
-                    value=value,
-                    display=display,
-                    word_no=word_no,
-                    start_char=start_char,
-                    end_char=end_char,
-                    confidence=float(r.score),
-                )
-            )
-    except Exception:
-        pass
-    return hits
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -538,12 +451,282 @@ def _run_presidio_on_line(line: str, engine) -> List[PiiHit]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def scan_text_line_by_line(text: str) -> List[PiiHit]:
+# Boundaries for patterns that must also work flush against Devanagari: `\b`
+# sees no boundary between a Hindi letter and a digit ("दिनांक12.12.2025").
+_NB = r"(?<![A-Za-z0-9])"
+_NA = r"(?![A-Za-z0-9])"
+# Optional "No." style marker between a label and its value, English and Hindi.
+_NUM_MARKER = r"(?i:No|Nos|Number|नंबर|नम्बर|नं[०0o]?|न[०0o]|संख्या|क्रमांक|सं[०0o]?|#)\.?"
+
+_USER_ID_RE = re.compile(
+    r"(?i:User\s*ID(?:\s*\([^)]+\))?|UserId|Username|User_ID|Portal\s*ID)"
+    r"[_\-:=\s]+([a-zA-Z0-9_\-]+)"
+)
+# The value must hold a digit: under a blanket re.I the value class matched any
+# word, so "PPP id belongs" hashed "belongs". With the digit required, any case
+# is safe ("ppp id 6use5293").
+_PPP_ID_RE = re.compile(
+    r"(?i:PPP(?:\s*ID)?|Fa(?:i|mi)?mily\s*I\.?\s?D|Parivar\s*Pehchan\s*Patra"
+    r"|परिवार\s*पहचान\s*पत्र|(?:फैमिली|फॅमिली|फेमिली|फ़ैमिली)\s*(?:आई\.?\s*डी|आईडी))"
+    rf"\.?(?:\s*{_NUM_MARKER})?[\s:\-.()#]*"
+    rf"((?=[A-Za-z0-9]*\d)[A-Za-z0-9]{{6,12}}){_NA}"
+)
+_PATIENT_ID_RE = re.compile(
+    r"(?i:Patient\s*ID|UHID|Medical\s*UHID|Health\s*ID)[_\-:\s.]+"
+    r"((?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]+)"
+)
+_BANK_ACCOUNT_RE = re.compile(
+    r"(?i:Bank\s*Account(?:\s*Number|\s*No)?|SBI\s*Account|Account\s*No|Account\s*Number"
+    r"|A/c(?:\s*No)?|खाता(?:\s*(?:संख्या|सं|नं|नंबर)\.?)?)"
+    rf"[_\-:\s.०]*(\d{{9,18}}){_NA}"
+)
+_AADHAAR_LABELLED_RE = re.compile(
+    r"(?i:Aadhaa?r|Adhaa?r|UIDAI|आधार)(?:\s*(?i:card|कार्ड))?"
+    rf"(?:\s*{_NUM_MARKER})?[\s:\-.]*"
+    r"(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})(?!\d)"
+)
+_AADHAAR_RE = re.compile(r"(?<!\d)(?<!\d[\s\-])[2-9]\d{3}([\s\-]?)\d{4}\1\d{4}(?!\d|[\s\-]\d)")
+# Mobile: optional +91 / 0 prefix, digits grouped with spaces or hyphens
+# ("80535-09009", "97293 91193", "98765 - 43210").
+_PHONE_SEP = r"(?:\s?-\s?|\s)?"
+# India's country code in any written form: +91, 0091, (+91), and for mobiles a
+# bare 91. It is part of the match, so no "(+91)" or "0091" is left behind.
+_COUNTRY_CODE = rf"(?:\(\s*)?(?:\+\s?|00)91(?:\s*\))?{_PHONE_SEP}"
+# The 10 digits as Indian mobiles are written: unbroken, 5+5, 3+3+4 or 4+3+3.
+# A separator allowed between any two digits also read "Section 91 1000 2000"
+# as a number.
+_MOBILE_DIGITS = (
+    rf"[6-9](?:\d{{9}}|\d{{4}}{_PHONE_SEP}\d{{5}}"
+    rf"|\d{{2}}{_PHONE_SEP}\d{{3}}{_PHONE_SEP}\d{{4}}|\d{{3}}{_PHONE_SEP}\d{{3}}{_PHONE_SEP}\d{{3}})"
+)
+_MOBILE_RE = re.compile(
+    rf"(?<![\d+(])(?:{_COUNTRY_CODE}|91{_PHONE_SEP}|0)?{_MOBILE_DIGITS}(?!\d)"
+)
+# Landline: national number = STD code + subscriber number, 9-10 digits, written
+# after a trunk 0 ("0172-2521617") or after the country code, with or without
+# the 0 ("+91 172 2521617", "+91 0172 2521617"). A bare 91 is not accepted here.
+_LANDLINE_RE = re.compile(
+    rf"(?<![\d+(])(?:{_COUNTRY_CODE}0?|0)(?P<national>[1-9]\d{{1,3}}{_PHONE_SEP}\d{{6,8}})(?!\d)"
+)
+
+_MONTHS_EN = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_MONTHS_HI = (
+    r"जनवरी|फरवरी|फ़रवरी|मार्च|अप्रैल|अप्रेल|मई|जून|जुलाई|अगस्त|सितंबर|सितम्बर"
+    r"|अक्टूबर|अक्तूबर|नवंबर|नवम्बर|दिसंबर|दिसम्बर"
+)
+_DAY = r"(?:0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?"
+_MONTH = rf"(?:(?i:{_MONTHS_EN})\.?(?![A-Za-z])|(?:{_MONTHS_HI})(?![\u0900-\u097F]))"
+_DATE_RES = [
+    # 12.12.2025, 09/04/2026, 25-3-2026
+    re.compile(
+        r"(?<![\d.\/\-])(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}(?!\d)"
+    ),
+    # 25.03.26 — same separator twice, so "1.2-3" style ranges are not dates
+    re.compile(
+        r"(?<![\d.\/\-])(?:0?[1-9]|[12]\d|3[01])([\/\-.])(?:0?[1-9]|1[0-2])\1\d{2}(?![\d.\/\-]?\d)"
+    ),
+    # 25 Feb 2025, 1 अप्रैल 2025, 3rd of March, 2024
+    re.compile(rf"(?<!\d){_DAY}[\s\-.,/]*(?:of\s+)?{_MONTH}[\s\-.,/]*(?:19|20)\d{{2}}(?!\d)"),
+    # Feb 25, 2025
+    re.compile(rf"{_NB}{_MONTH}\s*{_DAY},?\s*(?:19|20)\d{{2}}(?!\d)"),
+]
+
+_OTHER_ID_RES = [
+    ("GSTIN", re.compile(rf"{_NB}\d{{2}}[A-Z]{{5}}\d{{4}}[A-Z][1-9A-Z]Z[0-9A-Z]{_NA}")),
+    ("ABHA", re.compile(r"(?<![\d\-])\d{2}-\d{4}-\d{4}-\d{4}(?![\d\-])")),
+    # handle@bank: an '@' with no dot after it, so it is not an email address
+    ("UPI_ID", re.compile(r"(?<![\w.\-])[A-Za-z0-9.\-_]{2,64}@[A-Za-z]{2,32}(?![\w.\-@])")),
+]
+
+# Catch-all for identifiers no named rule covers (family/property/meter/service
+# numbers, case IDs, ...): a standalone run of 6-24 capitals and digits holding a
+# digit, plus either a letter or 7+ digits. Words never contain digits, and the
+# numbers prose does contain (amounts, years, section numbers) are short or
+# punctuated, so neither shape passes.
+# Codes the general ID rule would otherwise hash that identify no one: financial
+# years (FY2025) and highway numbers (NH709A, SH20).
+_PUBLIC_CODE = re.compile(r"(?:FY|NH|SH|MDR)\d{1,4}[A-Z]?")
+_GENERIC_ID_RE = re.compile(
+    rf"{_NB}(?=[A-Z0-9]*\d)(?=\d*[A-Z]|\d{{7}})[A-Z0-9]{{6,24}}(?![a-z0-9])"
+    # not a system attachment name ("CRFBD17746178970.pdf"): hashing it would
+    # break the link to the file, and the named rules above still scan it
+    r"(?!\.(?i:pdf|jpe?g|png|gif|tiff?|docx?|xlsx?|csv|txt|zip)\b)"
+)
+# Slash-structured reference codes: CMOFF/J/2026/003159, DEV/2026-2027/322.
+_SLASH_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9/])(?=[A-Z0-9/\-]*\d)[A-Z]{2,}(?:/[A-Z0-9\-]+){2,}(?![A-Za-z0-9/])"
+)
+
+# Labels whose number identifies a person's case, land, property or connection.
+# A dataset config can replace either list (free_text_anonymization.reference_keywords /
+# strong_reference_keywords); court and letter numbers are public references and
+# are left off by default.
+#
+# Strong labels are always followed by their number, so the "No." marker is
+# optional after them ("FIR 140", "मुकदमा 61"). Weak labels are ordinary words
+# too ("case", "house"), so they need the marker ("Case No. 78") or a number/year
+# shape ("case 78/2025"), or "in case 2 people" would be hashed.
+DEFAULT_STRONG_REFERENCE_KEYWORDS: Tuple[str, ...] = (
+    r"F\.?\s?I\.?\s?R", r"एफ\.?\s?आई\.?\s?आर", r"मुकदमा", r"मुकद्दमा", r"अभियोग",
+    r"khasra", r"खसरा", r"khewat", r"खेवट", r"khat(?:a|au|o)ni", r"खतौनी", r"इंतकाल",
+    r"I\.?\s?D", r"आई\.?\s?डी", r"आईडी",
+)
+DEFAULT_REFERENCE_KEYWORDS: Tuple[str, ...] = (
+    r"case", r"complaint", r"शिकायत", r"परिवाद", r"pariwad", r"DDR", r"रपट",
+    r"killa", r"किला", r"mutation", r"house", r"H", r"मकान",
+    r"plot", r"प्लॉट", r"DSS", r"property(?:\s*ID)?", r"प्रॉपर्टी(?:\s*आईडी)?",
+    r"meter", r"मीटर", r"connection", r"कनेक्शन", r"consumer", r"उपभोक्ता",
+    r"account", r"खाता", r"registration", r"पंजीकरण", r"पंजी", r"service", r"सर्विस",
+    r"ration\s*card", r"राशन\s*कार्ड", r"licen[cs]e", r"लाइसेंस", r"challan", r"चालान",
+    r"PPO", r"pension", r"पेंशन", r"पेंसन", r"roll", r"रोल", r"vehicle", r"वाहन",
+    r"receipt", r"रसीद", r"application", r"आवेदन",
+)
+_NEVER_MATCH = re.compile(r"(?!x)x")
+
+
+# A reference value: letters, digits, '/' and '-', holding at least one digit.
+# Any case: after a label, a digit is enough to rule out ordinary words.
+_REF_VALUE = r"(?=[A-Za-z0-9/\-]*\d)[A-Za-z0-9](?:[A-Za-z0-9/\-]*[A-Za-z0-9])?"
+# Further numbers of a list after the first: "No. 140 & 141", "No 589, 526".
+_REF_CONTINUATION = re.compile(
+    rf"\s*(?:,|&|\band\b|\bto\b|व|तथा|एवं|से)\s*(?P<value>{_REF_VALUE}){_NA}"
+)
+_YEAR = re.compile(r"(?:19|20)\d{2}")
+
+
+@lru_cache(maxsize=32)
+def _reference_number_re(
+    keywords: Tuple[str, ...], strong_keywords: Tuple[str, ...]
+) -> "re.Pattern[str]":
+    """Label + optional "No." marker + number, e.g. "FIR No. 0133/2026"."""
+    groups = []
+    if strong_keywords:
+        groups.append("(?P<strong>" + "|".join(f"(?:{k})" for k in strong_keywords) + ")")
+    if keywords:
+        groups.append("(?P<weak>" + "|".join(f"(?:{k})" for k in keywords) + ")")
+    if not groups:
+        return _NEVER_MATCH
+    return re.compile(
+        rf"(?<![A-Za-z\u0900-\u097F])(?i:{'|'.join(groups)})(?![A-Za-z])\.?"
+        rf"(?:\s*(?P<marker>{_NUM_MARKER}))?[\s:\-–#.]*"
+        rf"(?P<value>{_REF_VALUE}){_NA}"
+    )
+
+
+def _reference_spans(line: str, pattern: "re.Pattern[str]") -> List[Tuple[int, int]]:
+    """(start, end) of every reference value in `line`, list continuations included."""
+    spans: List[Tuple[int, int]] = []
+    for m in pattern.finditer(line):
+        value = m.group("value")
+        if not m.group("marker") and "/" not in value:
+            # No marker: a weak label needs a number/year shape, and a strong
+            # one at least two characters ("FIR 140", not "FIR 2 baar").
+            if (m.groupdict().get("strong") is None) or len(value) < 2:
+                continue
+        spans.append(m.span("value"))
+        pos = m.end("value")
+        while (cont := _REF_CONTINUATION.match(line, pos)) is not None:
+            if _YEAR.fullmatch(cont.group("value")):
+                break  # "FIR No. 140, 2025": the year, not a second FIR
+            spans.append(cont.span("value"))
+            pos = cont.end("value")
+    return spans
+
+
+_DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+# Money is not an identifier: digits right after Rs/₹/रुपये or before "/-".
+_AMOUNT_BEFORE = re.compile(r"(?i:rs\.?|inr|₹|रु\.?|रू\.?|रुपये|रूपये|रुपए)\s*$")
+_AMOUNT_AFTER = re.compile(r"^\s*(?:/-|(?i:rupees|lakh|lac|crore)\b|रुपये|रूपये|लाख|करोड़)")
+
+
+_VERHOEFF_D = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (1, 2, 3, 4, 0, 6, 7, 8, 9, 5),
+    (2, 3, 4, 0, 1, 7, 8, 9, 5, 6), (3, 4, 0, 1, 2, 8, 9, 5, 6, 7),
+    (4, 0, 1, 2, 3, 9, 5, 6, 7, 8), (5, 9, 8, 7, 6, 0, 4, 3, 2, 1),
+    (6, 5, 9, 8, 7, 1, 0, 4, 3, 2), (7, 6, 5, 9, 8, 2, 1, 0, 4, 3),
+    (8, 7, 6, 5, 9, 3, 2, 1, 0, 4), (9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
+)
+_VERHOEFF_P = (
+    (0, 1, 2, 3, 4, 5, 6, 7, 8, 9), (1, 5, 7, 6, 2, 8, 3, 0, 9, 4),
+    (5, 8, 0, 3, 7, 9, 6, 1, 4, 2), (8, 9, 1, 6, 0, 4, 3, 5, 2, 7),
+    (9, 4, 5, 3, 1, 2, 6, 8, 7, 0), (4, 2, 8, 6, 5, 7, 3, 9, 0, 1),
+    (2, 7, 9, 3, 8, 0, 6, 4, 1, 5), (7, 0, 4, 6, 9, 1, 3, 2, 5, 8),
+)
+
+
+def _verhoeff_valid(number: str) -> bool:
+    """Aadhaar's check digit (Verhoeff), over the digits of `number`."""
+    check = 0
+    for i, ch in enumerate(reversed(re.sub(r"\D", "", number))):
+        check = _VERHOEFF_D[check][_VERHOEFF_P[i % 8][int(ch)]]
+    return check == 0
+
+
+def _add_span_hit(
+    hits: List[PiiHit], source: str, label: str, line_str: str, lno: int, start: int, end: int
+):
+    hits.append(
+        PiiHit(
+            source,
+            label,
+            line_str[start:end],
+            PII_DISPLAY_NAMES.get(label, label.replace("_", " ")),
+            lno,
+            get_word_number(line_str, start),
+            start + 1,
+            end,
+        )
+    )
+
+
+def _add_hit(hits: List[PiiHit], source: str, label: str, line_str: str, lno: int, m, group=0):
+    hits.append(
+        PiiHit(
+            source,
+            label,
+            m.group(group).strip(),
+            PII_DISPLAY_NAMES.get(label, label.replace("_", " ")),
+            lno,
+            get_word_number(line_str, m.start(group)),
+            m.start(group) + 1,
+            m.end(group),
+        )
+    )
+
+
+@lru_cache(maxsize=32)
+def _deny_term_re(terms: Tuple[str, ...]) -> Optional["re.Pattern[str]"]:
+    """Any of `terms`, any case, with any run of spaces between its words."""
+    parts = [r"\s+".join(re.escape(w) for w in t.split()) for t in terms if t.strip()]
+    return re.compile("|".join(parts), re.I) if parts else None
+
+
+
+def scan_text_line_by_line(
+    text: str,
+    reference_keywords: Optional[Sequence[str]] = None,
+    strong_reference_keywords: Optional[Sequence[str]] = None,
+    deny_terms: Optional[Sequence[str]] = None,
+) -> List[PiiHit]:
     hits: List[PiiHit] = []
     lines = text.splitlines()
+    deny_re = _deny_term_re(tuple(deny_terms or ()))
+    reference_re = _reference_number_re(
+        tuple(DEFAULT_REFERENCE_KEYWORDS if reference_keywords is None else reference_keywords),
+        tuple(
+            DEFAULT_STRONG_REFERENCE_KEYWORDS
+            if strong_reference_keywords is None
+            else strong_reference_keywords
+        ),
+    )
 
     for line_idx, line in enumerate(lines):
-        line_str = line.strip()
+        # Devanagari digits ("९८७६५४३२१०") read as ASCII for every pattern below.
+        # One character for one, so hit offsets still index the original text.
+        line_str = line.strip().translate(_DEVANAGARI_DIGITS)
         if not line_str:
             continue
         lno = line_idx + 1
@@ -616,7 +799,7 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
             )
 
         for m in re.finditer(
-            r"\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b", line_str
+            r"\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b", line_str, re.I
         ):
             hits.append(
                 PiiHit(
@@ -661,94 +844,29 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                 )
             )
 
-        for m in re.finditer(
-            r"(?:User\s*ID(?:\s*\([^)]+\))?|UserId|Username|User_ID|Portal\s*ID)[_\-:\s]+([a-zA-Z0-9_\-]+)",
-            line_str,
-            re.I,
-        ):
-            hits.append(
-                PiiHit(
-                    "Contextual Regex",
-                    "User_ID",
-                    m.group(1).strip(),
-                    PII_DISPLAY_NAMES["User_ID"],
-                    lno,
-                    get_word_number(line_str, m.start(1)),
-                    m.start(1) + 1,
-                    m.end(1),
-                )
-            )
+        for m in _USER_ID_RE.finditer(line_str):
+            # A username may be all letters, so a digit-free value is accepted
+            # only when an explicit ':' / '=' marks it as the field's value.
+            if re.search(r"\d", m.group(1)) or re.search(r"[:=]", m.group(0)):
+                _add_hit(hits, "Contextual Regex", "User_ID", line_str, lno, m, 1)
 
-        for m in re.finditer(
-            r"(?:PPP\s*ID|PPP|FAMILY\s*ID|Parivar\s*Pehchan\s*Patra)[_\-:\s\(\)]*([A-Z0-9]{6,10})",
-            line_str,
-            re.I,
-        ):
-            hits.append(
-                PiiHit(
-                    "Contextual Regex",
-                    "PPP_ID",
-                    m.group(1).strip(),
-                    PII_DISPLAY_NAMES["PPP_ID"],
-                    lno,
-                    get_word_number(line_str, m.start(1)),
-                    m.start(1) + 1,
-                    m.end(1),
-                )
-            )
+        for m in _PPP_ID_RE.finditer(line_str):
+            _add_hit(hits, "Contextual Regex", "PPP_ID", line_str, lno, m, 1)
 
-        for m in re.finditer(
-            r"(?:Patient\s*ID|Patient\s*Id|UHID|Medical\s*UHID|Health\s*ID)[_\-:\s]+([a-zA-Z0-9_\-]+)",
-            line_str,
-            re.I,
-        ):
-            hits.append(
-                PiiHit(
-                    "Contextual Regex",
-                    "Patient_ID",
-                    m.group(1).strip(),
-                    PII_DISPLAY_NAMES["Patient_ID"],
-                    lno,
-                    get_word_number(line_str, m.start(1)),
-                    m.start(1) + 1,
-                    m.end(1),
-                )
-            )
+        for m in _PATIENT_ID_RE.finditer(line_str):
+            _add_hit(hits, "Contextual Regex", "Patient_ID", line_str, lno, m, 1)
 
-        for m in re.finditer(
-            r"(?:Bank\s*Account(?:\s*Number|\s*No)?|SBI\s*Account|Account\s*No|Account\s*Number)[_\-:\s]*(\d{9,18})",
-            line_str,
-            re.I,
-        ):
-            hits.append(
-                PiiHit(
-                    "Contextual Regex",
-                    "Bank_Account",
-                    m.group(1).strip(),
-                    PII_DISPLAY_NAMES["Bank_Account"],
-                    lno,
-                    get_word_number(line_str, m.start(1)),
-                    m.start(1) + 1,
-                    m.end(1),
-                )
-            )
+        for m in _BANK_ACCOUNT_RE.finditer(line_str):
+            _add_hit(hits, "Contextual Regex", "Bank_Account", line_str, lno, m, 1)
 
-        for m in re.finditer(
-            r"(?<!\d[\s\-])\b[2-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}\b(?!\d|[\s\-]\d)",
-            line_str,
-        ):
-            hits.append(
-                PiiHit(
-                    "Regex",
-                    "Aadhaar",
-                    m.group(0).strip(),
-                    PII_DISPLAY_NAMES["Aadhaar"],
-                    lno,
-                    get_word_number(line_str, m.start()),
-                    m.start() + 1,
-                    m.end(),
-                )
-            )
+        for m in _AADHAAR_LABELLED_RE.finditer(line_str):
+            _add_hit(hits, "Contextual Regex", "Aadhaar", line_str, lno, m, 1)
+
+        for m in _AADHAAR_RE.finditer(line_str):
+            # Unseparated, a 12-digit run is as likely an account or reference
+            # number, so it must also pass Aadhaar's Verhoeff check digit.
+            if m.group(1) or _verhoeff_valid(m.group(0)):
+                _add_hit(hits, "Regex", "Aadhaar", line_str, lno, m)
 
         for m in re.finditer(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", line_str):
             hits.append(
@@ -780,45 +898,47 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
                 )
             )
 
-        for m in re.finditer(
-            r"(?:Phone|Mobile|Contact|Cell|Tel|Primary\s*Contact)?[^\n\d]*\b(\+91[\s\-]?[6-9]\d{9}|[6-9]\d{9})\b",
-            line_str,
-            re.I,
-        ):
-            val = m.group(1).strip()
-            if (
-                "account" not in line_str.lower()
-                and "pension" not in line_str.lower()
-            ):
-                hits.append(
-                    PiiHit(
-                        "Regex",
-                        "Phone_Number",
-                        val,
-                        PII_DISPLAY_NAMES["Phone_Number"],
-                        lno,
-                        get_word_number(line_str, m.start(1)),
-                        m.start(1) + 1,
-                        m.end(1),
-                    )
-                )
+        for m in _MOBILE_RE.finditer(line_str):
+            _add_hit(hits, "Regex", "Phone_Number", line_str, lno, m)
 
-        for m in re.finditer(
-            r"\b(?:0?[1-9]|[12]\d|3[01])[\/\-.](?:0?[1-9]|1[0-2])[\/\-.](?:19|20)\d{2}\b",
-            line_str,
-        ):
-            hits.append(
-                PiiHit(
-                    "Regex",
-                    "Date",
-                    m.group(0).strip(),
-                    PII_DISPLAY_NAMES["Date"],
-                    lno,
-                    get_word_number(line_str, m.start()),
-                    m.start() + 1,
-                    m.end(),
-                )
-            )
+        for m in _LANDLINE_RE.finditer(line_str):
+            if len(re.sub(r"\D", "", m.group("national"))) in (9, 10):
+                _add_hit(hits, "Regex", "Phone_Number", line_str, lno, m)
+
+        for pattern in _DATE_RES:
+            for m in pattern.finditer(line_str):
+                _add_hit(hits, "Regex", "Date", line_str, lno, m)
+
+        for label, pattern in _OTHER_ID_RES:
+            for m in pattern.finditer(line_str):
+                _add_hit(hits, "Regex", label, line_str, lno, m)
+
+        # Names a reviewer confirmed the models miss: always PERSON, whole words only
+        # (so "Jagdish" does not hit inside "Jagdishpur").
+        if deny_re is not None:
+            for m in deny_re.finditer(line_str):
+                s0, e0 = m.span()
+                if (s0 > 0 and _is_word_char(line_str[s0 - 1])) or (
+                    e0 < len(line_str) and _is_word_char(line_str[e0])
+                ):
+                    continue
+                _add_hit(hits, "Deny list", "PERSON", line_str, lno, m)
+
+        for start, end in _reference_spans(line_str, reference_re):
+            _add_span_hit(hits, "Contextual Regex", "Reference_Number", line_str, lno, start, end)
+
+        # Last: any standalone ID-shaped token the rules above did not name. It
+        # overlaps their hits on purpose; _sanitize keeps the first (specific) label.
+        for pattern in (_GENERIC_ID_RE, _SLASH_REFERENCE_RE):
+            for m in pattern.finditer(line_str):
+                if _PUBLIC_CODE.fullmatch(m.group(0)):
+                    continue
+                if m.group(0).isdigit() and (
+                    _AMOUNT_BEFORE.search(line_str[max(0, m.start() - 12) : m.start()])
+                    or _AMOUNT_AFTER.match(line_str[m.end() :])
+                ):
+                    continue  # "Rs 3500000", "3500000/-"
+                _add_hit(hits, "Regex", "ID_Number", line_str, lno, m)
 
         for m in re.finditer(
             r"\baged?\s+(?:about\s+)?(\d{1,3}\s*[Yy]ears?)\b", line_str
@@ -872,53 +992,16 @@ def scan_text_line_by_line(text: str) -> List[PiiHit]:
     return line_dedup
 
 
-def full_pii_scan(text: str) -> Tuple[List[PiiHit], List[PiiHit]]:
-    regex_hits = scan_text_line_by_line(text)
-
-    presidio_hits: List[PiiHit] = []
-    # PRESIDIO MODEL (COMMENTED OUT - uncomment to re-enable Presidio scan)
-    # engine = _get_presidio_engine()
-    # if engine:
-    #     lines = text.splitlines()
-    #     raw_presidio: List[PiiHit] = []
-    #     for lno, line in enumerate(lines, 1):
-    #         for h in _run_presidio_on_line(line.strip(), engine):
-    #             h.line_no = lno
-    #             raw_presidio.append(h)
-    #     seen_p: set = set()
-    #     for h in raw_presidio:
-    #         key = (
-    #             h.line_no,
-    #             h.label.upper(),
-    #             re.sub(r"[\s\-]", "", h.value).lower(),
-    #         )
-    #         if key not in seen_p and h.value.strip():
-    #             seen_p.add(key)
-    #             presidio_hits.append(h)
-
-    return regex_hits, presidio_hits
-
-
-def merge_pii_hits(
-    regex_hits: List[PiiHit], presidio_hits: List[PiiHit]
+def full_pii_scan(
+    text: str,
+    reference_keywords: Optional[Sequence[str]] = None,
+    strong_reference_keywords: Optional[Sequence[str]] = None,
+    deny_terms: Optional[Sequence[str]] = None,
 ) -> List[PiiHit]:
-    merged = list(regex_hits)
-
-    for p in presidio_hits:
-        p_val_clean = re.sub(r"[\s\-]", "", p.value).lower()
-        overlap_found = False
-
-        for r in regex_hits:
-            if r.line_no == p.line_no:
-                r_val_clean = re.sub(r"[\s\-]", "", r.value).lower()
-                if p_val_clean in r_val_clean or r_val_clean in p_val_clean:
-                    overlap_found = True
-                    break
-
-        if not overlap_found:
-            merged.append(p)
-
-    return merged
+    """Returns regex-based PII hits only. Presidio removed."""
+    return scan_text_line_by_line(
+        text, reference_keywords, strong_reference_keywords, deny_terms
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1108,15 +1191,32 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         return None
     try:
         hf_token = os.getenv("HF_TOKEN") or None
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            token=hf_token,
-            use_fast=use_fast,
-        )
-        model = AutoModelForTokenClassification.from_pretrained(
-            model_id,
-            token=hf_token,
-        )
+        # Cache first: an online load still probes the Hub (e.g. for a
+        # model.safetensors that IndicNER doesn't ship), and on a gated repo
+        # without a token that probe 401s and aborts the load even though every
+        # file is already cached. Only go to the network on a real cache miss.
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_id, use_fast=use_fast, local_files_only=True
+            )
+            model = AutoModelForTokenClassification.from_pretrained(
+                model_id, local_files_only=True
+            )
+        except OSError:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_id,
+                token=hf_token,
+                use_fast=use_fast,
+            )
+            model = AutoModelForTokenClassification.from_pretrained(
+                model_id,
+                token=hf_token,
+            )
+        # transformers warns that Davlan/xlm-roberta-base-ner-hrl loads "with an
+        # incorrect regex pattern" and suggests fix_mistral_regex=True. That is a
+        # false alarm for this model: as loaded, its tokens matched the reference
+        # SentencePiece tokenizer on 3,000 of 3,000 real grievance lines, while
+        # the suggested flag matched only 569. Do not set it.
         model.eval()
         model = _maybe_quantize(model, model_id)
         ner_pipe = _hf_pipeline(
@@ -1155,6 +1255,17 @@ def _load_ner_pipeline(model_id: str, use_fast: bool = True) -> Optional[object]
         return None
 
 
+def _is_word_char(ch: str) -> bool:
+    """Letters and digits, plus the combining marks that complete Indic letters.
+
+    Devanagari vowel signs, virama, nukta and anusvara (Unicode Mn/Mc) are not
+    str.isalnum(), so treating them as boundaries cut words mid-letter: a span
+    ending at "उर" in "उर्फ" was redacted to "*्फ", leaving an orphaned sign that
+    renders as a dotted circle. ZWJ/ZWNJ shape conjuncts and belong to the word too.
+    """
+    return ch.isalnum() or ch in "\u200c\u200d" or unicodedata.category(ch) in ("Mn", "Mc")
+
+
 def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
     """
     Expands character indices to complete word boundaries while strictly
@@ -1167,7 +1278,7 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
         prev = text[start - 1]
         if prev in STRICT_DELIMITERS:
             break
-        if prev.isalnum():
+        if _is_word_char(prev):
             start -= 1
         elif (
             prev == "."
@@ -1177,6 +1288,9 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
                 start == 2
                 or text[start - 3] in STRICT_DELIMITERS
                 or text[start - 3].isspace()
+                # chains of single letters: a span starting at "A" of "C.I.A"
+                # used to stop there and leave "C.I.*"
+                or text[start - 3] == "."
             )
         ):
             start -= 1
@@ -1188,7 +1302,7 @@ def _snap_to_word_boundary(text: str, start: int, end: int) -> Tuple[int, int]:
         nxt = text[end]
         if nxt in STRICT_DELIMITERS:
             break
-        if nxt.isalnum():
+        if _is_word_char(nxt):
             end += 1
         elif nxt == "." and end + 1 < len(text) and text[end + 1].isalnum():
             end += 1
@@ -1206,8 +1320,12 @@ def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
     val = text[start:end]
 
     # 1. Strip leading punctuation, slashes, and dangling prefix letters like "o.", "s.", "d."
+    #    Only relation markers (S/o, D/o, W/o, R/o, H/o; dotted: s.o.) are stripped as prefixes:
+    #    a looser "letter/letter" form ate "R/S" from "R/Sir", leaving "ir".
+    #    A letter-dot followed by another letter-dot is an abbreviation ("C.I.A"),
+    #    not a stray initial, and is kept.
     match_prefix = re.match(
-        r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+        r"^([\s:\-.,'\"/()]+|[A-Za-z]/[oO](?:\.\s*|\s+)|[A-Za-z]\.[oO]\.\s*|[a-zA-Z]\.(?![A-Za-z]\.)\s*)", val
     )
     while match_prefix and match_prefix.end() > 0:
         cut = match_prefix.end()
@@ -1216,7 +1334,7 @@ def _clean_entity_text(text: str, start: int, end: int) -> Tuple[str, int, int]:
         start += cut
         val = text[start:end]
         match_prefix = re.match(
-            r"^([\s:\-.,'\"/()]+|[A-Za-z]/[a-zA-Z]?\.?\s*|[a-zA-Z]\.\s*)", val
+            r"^([\s:\-.,'\"/()]+|[A-Za-z]/[oO](?:\.\s*|\s+)|[A-Za-z]\.[oO]\.\s*|[a-zA-Z]\.(?![A-Za-z]\.)\s*)", val
         )
 
     # 2. Strip trailing punctuation and dangling sub-word fragments (e.g. trailing " s")
@@ -1260,6 +1378,7 @@ def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
                 "word_no": get_word_number(original_line, st),
                 "start_char": st + 1,
                 "end_char": en,
+                "models": {s["model"]} if s.get("model") else set(),
             }
         )
 
@@ -1286,8 +1405,9 @@ def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
                     break
 
         if target is None:
-            same_cat_merged.append(dict(s))
+            same_cat_merged.append({**s, "models": set(s["models"])})
         else:
+            target["models"] |= s["models"]
             target["start"] = min(target["start"], s["start"])
             target["end"] = max(target["end"], s["end"])
             target_text, t_st, t_en = _clean_entity_text(
@@ -1301,19 +1421,42 @@ def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
             target["start_char"] = target["start"] + 1
             target["end_char"] = target["end"]
 
-    # 2. Non-Maximum Suppression (Longest span with highest confidence)
-    same_cat_merged.sort(key=lambda x: (-(x["end"] - x["start"]), -x["score"]))
+    # 2. Resolve overlaps between categories: one span covering the union, with the
+    #    category and score of the most confident member. Keeping only the longest
+    #    span dropped the rest outright, so a 0.46 ORG "sh Jag" (IndicNER) erased
+    #    a 0.90 PERSON "Jag" (XLM-R) and the name fell under the confidence floor;
+    #    and the uncovered part of a dropped span ("kailash" when LOC "reddy nagar"
+    #    won over PERSON "kailash reddy") went unredacted.
+    same_cat_merged.sort(key=lambda x: (x["start"], -x["end"]))
+    groups: List[List[Dict]] = []
+    for s in same_cat_merged:
+        if groups and s["start"] < max(g["end"] for g in groups[-1]):
+            groups[-1].append(s)
+        else:
+            groups.append([s])
+
     final_merged: List[Dict] = []
-
-    for candidate in same_cat_merged:
-        if not any(
-            candidate["start"] < chosen["end"]
-            and chosen["start"] < candidate["end"]
-            for chosen in final_merged
-        ):
-            final_merged.append(candidate)
-
-    final_merged.sort(key=lambda x: x["start"])
+    for group in groups:
+        best = max(group, key=lambda x: (x["score"], x["end"] - x["start"]))
+        models = set().union(*(g["models"] for g in group))
+        if len(group) == 1:
+            final_merged.append(best)
+            continue
+        text_val, st, en = _clean_entity_text(
+            original_line, min(g["start"] for g in group), max(g["end"] for g in group)
+        )
+        final_merged.append(
+            {
+                **best,
+                "start": st,
+                "end": en,
+                "text": text_val,
+                "word_no": get_word_number(original_line, st),
+                "start_char": st + 1,
+                "end_char": en,
+                "models": models,
+            }
+        )
 
     entities: List[NerEntity] = []
     seen = set()
@@ -1331,10 +1474,179 @@ def merge_line_spans(spans: List[Dict], original_line: str) -> List[NerEntity]:
                         word_no=m["word_no"],
                         start_char=m["start_char"],
                         end_char=m["end_char"],
+                        models=sorted(m["models"]),
                     )
                 )
 
     return entities
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NER FALSE-POSITIVE FILTERS
+# ─────────────────────────────────────────────────────────────────────────────
+# Each rule removes only what cannot be personal data, and every one was checked
+# against names that look like the junk it targets: "Shree"/"श्री"/"Sahab" are
+# names too, so they are not titles here; "Lucky", "Sunny", "Singh" and "Ram" are
+# common English words, so the dictionary rule never touches a capitalised or
+# PERSON entity; "Model Town" is all English, so LOCATION is never filtered.
+
+# Forms of address that are never a name on their own.
+NEVER_NAME_TITLES = frozenset(
+    {"sir", "madam", "mam", "maam", "mr", "mrs", "ms", "smt", "dr", "respected", "r",
+     "श्रीमान", "श्रीमती", "महोदय", "महोदया", "मान्यवर"}
+)
+# Hindi function words spaCy's Hindi stopword list leaves out.
+_HI_FUNCTION_WORDS = frozenset({"हेतु", "हेतू", "बारे", "बाबत", "संबंध", "सम्बन्ध", "द्वारा"})
+# English zipf frequency (wordfreq) above which a word counts as everyday vocabulary.
+_COMMON_WORD_ZIPF = 3.0
+# Casing evidence for the lowercase-PERSON rule: a word must have been seen at
+# least this often mid-sentence, and lowercase at least this share of the time.
+_CASING_MIN_SEEN = 3
+_CASING_LOWER_SHARE = 0.9
+
+# HARDCODED, temporary: everyday words the general rules deliberately do not
+# clear, exempted by name until a general rule covers them. Matched like
+# `ner_allow_terms` (whole entity, case/spelling-insensitive), in every dataset.
+#   "Milk" — tagged LOCATION in "the said Milk Booth" (issue #4). Rule 3 never
+#            filters LOCATION, because localities are often plain English
+#            ("Model Town", "Civil Lines").
+#   "Mark" — tagged PERSON for the verb in "Complaint is Mark to CIA-3" (#17).
+#            Rule 3 never filters a capitalised name, because Indian names are
+#            often English words ("Lucky", "Sunny").
+#   "kindly undetake" — tagged PERSON (issue #14); "undetake" is a typo, so
+#            neither the vocabulary rule nor any dictionary recognises it.
+# Cost: a person or place called just "Mark" or "Milk" is no longer redacted.
+# Remove an entry once a general rule handles it.
+HARDCODED_NER_ALLOW_TERMS: Tuple[str, ...] = ("Milk", "Mark", "kindly undetake")
+
+try:
+    from spacy.lang.en.stop_words import STOP_WORDS as _EN_STOP
+    from spacy.lang.hi.stop_words import STOP_WORDS as _HI_STOP
+except ImportError:  # the rule then only knows the Hindi extras above
+    _EN_STOP, _HI_STOP = frozenset(), frozenset()
+
+try:
+    from wordfreq import zipf_frequency as _zipf
+except ImportError:
+    _zipf = None
+
+_TOKEN_SPLIT = re.compile(r"[\s/.,()\-]+")
+_LATIN_WORD = re.compile(r"[A-Za-z][A-Za-z']*")
+
+
+def _entity_tokens(text: str) -> List[str]:
+    return [t for t in _TOKEN_SPLIT.split(text) if t]
+
+
+def ner_term_key(term: str) -> str:
+    """Spelling-insensitive key for allow-list matching.
+
+    Case, spacing and punctuation are ignored, and common romanisation and
+    Devanagari spelling variants fold together, so one entry covers
+    "Jan Samvaad" / "Jansamvaad" / "jan samwad" / "Jan Sanwaad", and
+    "सी.एम.विंडो" / "सीएम विन्डो" / "सी.एम.विन्ङो".
+    """
+    key = unicodedata.normalize("NFC", term).lower()
+    key = re.sub(r"[^\wऀ-ॿ]+|_", "", key)
+    key = key.replace("w", "v")
+    key = re.sub(r"[nm](?=v)", "m", key)          # sanwaad / samvaad
+    key = re.sub(r"([aeiou])\1+", r"\1", key)      # aa -> a, ee -> e
+    key = key.replace("़", "")                # nukta
+    key = re.sub(r"[नमङञण]्(?=[क-ह])", "ं", key)  # न्ड -> ंड
+    key = key.replace("ङ", "ड").replace("ँ", "ं")            # ङ typo, chandrabindu
+    return key
+
+
+def word_casing_stats(texts: Sequence[str]) -> Dict[str, List[int]]:
+    """{lowercased word: [times written lowercase, times capitalised]} mid-sentence.
+
+    Only Latin words in lines that are not wholly upper- or lowercase count, and
+    never the first word of a sentence, where capitals carry no information.
+    """
+    stats: Dict[str, List[int]] = {}
+    for text in texts:
+        for line in text.splitlines():
+            if line.isupper() or line.islower():
+                continue
+            for sentence in re.split(r"[.!?।\n]+", line):
+                words = _LATIN_WORD.findall(sentence)
+                for word in words[1:]:
+                    if word.isupper():
+                        continue  # acronyms say nothing about name-ness
+                    entry = stats.setdefault(word.lower(), [0, 0])
+                    entry[0 if word.islower() else 1] += 1
+    return stats
+
+
+_HARDCODED_ALLOW_KEYS = frozenset(ner_term_key(t) for t in HARDCODED_NER_ALLOW_TERMS)
+
+
+def ner_false_positive_reason(
+    entity: NerEntity,
+    line: str,
+    allow_keys: frozenset = frozenset(),
+    casing: Optional[Dict[str, List[int]]] = None,
+) -> Optional[str]:
+    """Why `entity` is not personal data, or None to keep it redacted."""
+    tokens = _entity_tokens(entity.text)
+    if not tokens:
+        return None
+    lowered = [t.lower() for t in tokens]
+
+    # Rule 4: a curated, dataset-specific term, matched as the whole entity only,
+    # so allow-listing "Jan Samvaad" never exempts "Jan Samvaad Ramesh".
+    key = ner_term_key(entity.text)
+    if allow_keys and key in allow_keys:
+        return "allow_list"
+    if key in _HARDCODED_ALLOW_KEYS:
+        return "hardcoded_allow"
+
+    # Rule 1: nothing but forms of address ("SIR", "R/Sir", "श्रीमान").
+    if all(t in NEVER_NAME_TITLES for t in lowered):
+        return "title_only"
+
+    single_model = len(entity.models) <= 1
+    latin = all(_LATIN_WORD.fullmatch(t) for t in tokens)
+    latin_lower = latin and all(t.islower() for t in tokens)
+    devanagari = not latin and all(re.fullmatch(r"[ऀ-ॿ]+", t) for t in tokens)
+
+    # Rule 2: function words, when written lowercase or in Hindi ("us", "हेतू")
+    # and found by one model; a capitalised "May" or "Will" may be a name.
+    if single_model and (latin_lower or devanagari) and all(
+        t in _EN_STOP or t in _HI_STOP or t in _HI_FUNCTION_WORDS for t in lowered
+    ):
+        return "function_word"
+
+    if not single_model or not latin:
+        return None
+
+    # Rule 3 needs this dataset's own casing evidence: a word written lowercase
+    # mid-sentence nearly every time it appears is vocabulary, not a name. That is
+    # what separates "afresh" or "department" from "Ram", "Singh" or "Lucky",
+    # which an English word list scores as just as common. A word seen too rarely
+    # to judge keeps the entity redacted.
+    if not casing or line.islower() or line.isupper():
+        return None
+
+    def mostly_lowercase(word: str) -> bool:
+        lower_n, upper_n = casing.get(word, (0, 0))
+        seen = lower_n + upper_n
+        return seen >= _CASING_MIN_SEEN and lower_n / seen >= _CASING_LOWER_SHARE
+
+    # Rule 3a: an ORGANIZATION made only of everyday English words ("concerned
+    # department", "Pls", "Head Office"). "Ram Traders" survives: "ram" is
+    # common English but this data writes it capitalised.
+    if entity.category == "ORGANIZATION" and _zipf is not None and all(
+        _zipf(t, "en") >= _COMMON_WORD_ZIPF and mostly_lowercase(t) for t in lowered
+    ):
+        return "common_words_org"
+
+    # Rule 3b: a PERSON written lowercase in normal-case text, made of words this
+    # dataset almost always writes lowercase ("afresh", "challan", "complainant").
+    if entity.category == "PERSON" and latin_lower and all(mostly_lowercase(t) for t in lowered):
+        return "lowercase_common_word"
+
+    return None
 
 
 def _parse_ner_items(
@@ -1500,24 +1812,17 @@ def extract_dual_pass_ner_spans(
     model_name: str = "",
 ) -> List[Dict]:
     """
-    Performs pure model inference in two passes:
-      1. Verbatim Pass: processes line_str as written.
-      2. Truecased Pass: processes truecase_line(line_str).
-    Because truecase_line preserves character length and index offsets exactly,
-    spans detected in both passes map 100% cleanly to original text character offsets.
+    Single-pass verbatim inference only.
+
+    The original dual-pass (verbatim + truecased) was removed because truecasing
+    ALL-CAPS text (e.g. "WATER PIPE LINE LEAKAGE" -> "Water Pipe Line Leakage")
+    causes IndicNER to spuriously tag infrastructure and complaint phrases as LOC/ORG.
+    IndicNER's tokenizer has do_lower_case=True, so casing is invisible anyway and
+    the truecased pass added false positives without improving true recall.
     """
-    spans_verbatim = _extract_line_spans_chunked(
+    return _extract_line_spans_chunked(
         pipe, line_str, min_score=min_score, model_name=model_name
     )
-
-    tc_line = truecase_line(line_str)
-    spans_tc = []
-    if tc_line != line_str:
-        spans_tc = _extract_line_spans_chunked(
-            pipe, tc_line, min_score=min_score, model_name=model_name
-        )
-
-    return spans_verbatim + spans_tc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1565,8 +1870,14 @@ def _infer_line_batch(
     short_tasks: List[LineTask] = []
     long_tasks: List[LineTask] = []
     for task in tasks:
-        # Fast character/word count heuristic to avoid heavy tokenizer Python call overhead
-        if len(task.line_text) <= 1200 or len(task.line_text.split()) <= 180:
+        # Skip the tokenizer only when the line provably fits: a subword tokenizer
+        # emits at most one token per character plus one word-boundary piece per
+        # word, plus the special tokens. The old "<= 1200 chars OR <= 180 words"
+        # guess let lines of 400-1200 tokens through as short; the pipe then
+        # truncated them at 512 (dropping any PII past that point) or, for HiNER,
+        # whose tokenizer sets no max length, crashed the whole batch into the
+        # slow one-line-at-a-time fallback.
+        if len(task.line_text) + len(task.line_text.split()) + 2 <= max_tokens:
             short_tasks.append(task)
         else:
             try:
@@ -1585,12 +1896,9 @@ def _infer_line_batch(
         batch_requests = []
         for task in short_tasks:
             text = task.line_text
-            # If line is ALL-CAPS, true-case it to improve NER entity recognition without duplicate passes
-            if text.isupper():
-                text = truecase_line(text)
-                batch_requests.append((task, True, text))
-            else:
-                batch_requests.append((task, False, text))
+            # Truecasing removed: converting ALL-CAPS -> Title Case causes infrastructure
+            # phrases ("WATER PIPE LINE LEAKAGE") to be spuriously tagged as LOC/ORG.
+            batch_requests.append((task, False, text))
 
         texts = [req[2] for req in batch_requests]
         try:
@@ -1695,8 +2003,7 @@ def _store_line_ner_results(
         )
 
     hybrid_spans = (
-        model_spans.get(NER_MODELS["HiNER"][0], [])
-        + model_spans.get(NER_MODELS["IndicNER"][0], [])
+        model_spans.get(NER_MODELS["IndicNER"][0], [])
         + model_spans.get(NER_MODELS["XLM_RoBERTa"][0], [])
     )
     model_line_ents[HYBRID_KEY] = merge_line_spans(hybrid_spans, line_text)
@@ -1770,10 +2077,12 @@ NER_TORCH_THREADS = int(os.getenv("NER_TORCH_THREADS", "0"))
 # (display label, model id, use_fast, min score) — mirrors run_line_by_line_ner's
 # `pipes` mapping, which is what HYBRID_KEY merges.
 _HYBRID_NER_SPECS: List[Tuple[str, str, bool, float]] = [
-    (NER_MODELS["HiNER"][0], "cfilt/HiNER-original-muril-base-cased", False, 0.20),
-    (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.20),
-    (NER_MODELS["XLM_RoBERTa"][0], "Babelscape/wikineural-multilingual-ner", True, 0.45),
+    (NER_MODELS["IndicNER"][0], "ai4bharat/IndicNER", False, 0.45),
+    (NER_MODELS["XLM_RoBERTa"][0], "Davlan/xlm-roberta-base-ner-hrl", True, 0.45),
 ]
+# min_score raised from 0.20 -> 0.45 for HiNER and IndicNER to match XLM-RoBERTa's
+# threshold. The 0.20 floor kept detections where the model was only 20% confident,
+# producing many spurious LOC/ORG tags on common Hindi words ("hamare", "pichhle", "do").
 
 
 def run_corpus_line_ner(
@@ -1907,15 +2216,13 @@ def _corpus_ner_passes(
 
 def run_line_by_line_ner(
     records: List[FileRecord],
-    include_bert: bool = True,
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
 ):
     """Load each NER model once, then fan lines out to dedicated worker threads.
 
-    Architecture: Files → Dispatcher → Q_H / Q_I / Q_X → workers → Q_M → merger.
-    Threads share process memory (one model instance per thread). On GPU, inference
-    is locked so CUDA is not used concurrently; on CPU the three models overlap.
+    Architecture: Files → Dispatcher → Q_I / Q_X → workers → Q_M → merger.
+    Threads share process memory (one model instance per thread). On CPU the two models overlap.
     """
     if not _TRANSFORMERS_AVAILABLE:
         print(
@@ -1928,29 +2235,15 @@ def run_line_by_line_ner(
         f"  [NER] Loading HuggingFace models on {_NER_DEVICE_STR} …",
         flush=True,
     )
-    hiner_pipe = _load_ner_pipeline(
-        "cfilt/HiNER-original-muril-base-cased", use_fast=False
-    )
     indicner_pipe = _load_ner_pipeline("ai4bharat/IndicNER", use_fast=False)
-    # BERT MODEL (COMMENTED OUT - uncomment to re-enable BERT model)
-    # bert_pipe = (
-    #     _load_ner_pipeline("dslim/bert-base-NER", use_fast=True)
-    #     if include_bert
-    #     else None
-    # )
-    bert_pipe = None
     xlm_pipe = _load_ner_pipeline(
-        "Babelscape/wikineural-multilingual-ner", use_fast=True
+        "Davlan/xlm-roberta-base-ner-hrl", use_fast=True
     )
 
     pipes = {
-        NER_MODELS["HiNER"][0]: (hiner_pipe, 0.20),
-        NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.20),
+        NER_MODELS["IndicNER"][0]: (indicner_pipe, 0.45),
         NER_MODELS["XLM_RoBERTa"][0]: (xlm_pipe, 0.45),
     }
-    # BERT MODEL (COMMENTED OUT - uncomment to re-enable BERT model)
-    # if include_bert:
-    #     pipes[NER_MODELS["BERT_Base_NER"][0]] = (bert_pipe, 0.45)
 
     model_labels = list(pipes.keys())
     all_model_labels = [v[0] for v in NER_MODELS.values()]
@@ -2091,17 +2384,15 @@ def run_line_by_line_ner(
 
 def scan_records_pii(records: List[FileRecord]):
     for rec in records:
-        regex_hits, presidio_hits = full_pii_scan(rec.raw_text)
-        rec.pii_hits = merge_pii_hits(regex_hits, presidio_hits)
+        rec.pii_hits = full_pii_scan(rec.raw_text)
 
 
 def analyze_records(
     records: List[FileRecord],
-    include_bert: bool = True,
     batch_size: int = NER_LINE_BATCH_SIZE,
     queue_size: int = NER_QUEUE_MAXSIZE,
 ):
-    """Dispatcher overlap: Regex/Presidio PII runs while NER workers consume lines."""
+    """Regex PII scan runs in a dispatcher thread while NER workers consume lines."""
     pii_errors: List[BaseException] = []
 
     def _pii_worker():
@@ -2114,7 +2405,6 @@ def analyze_records(
     pii_thread.start()
     run_line_by_line_ner(
         records,
-        include_bert=include_bert,
         batch_size=batch_size,
         queue_size=queue_size,
     )
@@ -2134,17 +2424,13 @@ def build_json(records: List[FileRecord], output_path: str):
     print(f"\n▶ Writing JSON reports → {base_name}_*.json …", flush=True)
 
     all_models = [
-        NER_MODELS["HiNER"][0],
         NER_MODELS["IndicNER"][0],
-        NER_MODELS["BERT_Base_NER"][0],
         NER_MODELS["XLM_RoBERTa"][0],
         HYBRID_KEY,
     ]
 
     model_slugs = {
-        NER_MODELS["HiNER"][0]: "HiNER",
         NER_MODELS["IndicNER"][0]: "IndicNER",
-        NER_MODELS["BERT_Base_NER"][0]: "BERT_Base_NER",
         NER_MODELS["XLM_RoBERTa"][0]: "XLM_RoBERTa",
         HYBRID_KEY: "Hybrid",
     }
@@ -2273,7 +2559,6 @@ _C = {
     "anon_cell": "E8F5E9",
     "lang_cell": "FFF9C4",
     "regex_cell": "E3F2FD",
-    "presidio_bg": "FFF3E0",
     "green_flag": "C8E6C9",
     "age_cell": "F3E5F5",
 }
@@ -2303,14 +2588,12 @@ def _auto_width(ws, max_w: int = 55):
 
 
 def build_excel(
-    records: List[FileRecord], output_path: str, presidio_available: bool
+    records: List[FileRecord], output_path: str, presidio_available: bool = False
 ):
     print(f"\n▶ Writing 4-Sheet Excel report → {output_path} …", flush=True)
 
     all_model_labels = [
-        NER_MODELS["HiNER"][0],
         NER_MODELS["IndicNER"][0],
-        NER_MODELS["BERT_Base_NER"][0],
         NER_MODELS["XLM_RoBERTa"][0],
         HYBRID_KEY,
     ]
@@ -2319,10 +2602,6 @@ def build_excel(
     s1_rows = []
     for rec in records:
         all_hits = rec.pii_hits
-        regex_hits = [
-            h for h in all_hits if h.source in ("Regex", "Contextual Regex")
-        ]
-        presidio_h = [h for h in all_hits if h.source == "Presidio"]
         tot_pii = len(all_hits)
         pii_types = ", ".join(sorted({h.label for h in all_hits})) or "None"
 
@@ -2343,16 +2622,11 @@ def build_excel(
                 "File Type": rec.file_type.upper(),
                 "Language": rec.language,
                 "Total PII Entities": tot_pii,
-                "Regex PII Hits": len(regex_hits),
-                "Presidio PII Hits": len(presidio_h),
                 "PII Types Found": pii_types,
                 "Hybrid NER Persons": " | ".join(hy_persons) or "None",
                 "Hybrid NER Locations": " | ".join(hy_locs) or "None",
                 "Hybrid NER Organizations": " | ".join(hy_orgs) or "None",
                 "Has PII": "YES" if tot_pii > 0 else "NO",
-                "Presidio Engine": (
-                    "Active" if presidio_available else "Not Installed"
-                ),
             }
         )
 
@@ -2566,8 +2840,7 @@ def build_excel(
                     cell.fill = _FILLS["pii_hit"]
                 elif hdr == "Has PII" and val == "NO":
                     cell.fill = _FILLS["green_flag"]
-                elif hdr == "Detected By" and val == "Presidio":
-                    cell.fill = _FILLS["presidio_bg"]
+
                 elif hdr == "Source Type" and val == "NER Model":
                     cell.fill = _FILLS["regex_cell"]
                 elif "Original Value" in hdr:
@@ -2612,13 +2885,12 @@ def process_text_string(
         raw_text=text,
     )
 
-    presidio_ok = False
     analyze_records(
         [rec],
         batch_size=max(1, batch_size),
         queue_size=max(8, queue_size),
     )
-    build_excel([rec], output_path, presidio_ok)
+    build_excel([rec], output_path)
     build_json([rec], output_path)
 
     return [rec]
@@ -2702,13 +2974,6 @@ def main():
     if args.hf_token:
         os.environ["HF_TOKEN"] = args.hf_token
 
-    # Presidio check (COMMENTED OUT - Presidio disabled)
-    # presidio_ok = _PRESIDIO_AVAILABLE and (_get_presidio_engine() is not None)
-    # print(
-    #     f"[Pipeline] Presidio:         {'✓ Active' if presidio_ok else '✗ Not available'}",
-    #     flush=True,
-    # )
-    presidio_ok = False
     print(
         f"[Pipeline] NER Transformers: {'✓ Available on ' + _NER_DEVICE_STR if _TRANSFORMERS_AVAILABLE else '✗ Not installed'}",
         flush=True,
@@ -2763,7 +3028,7 @@ def main():
         batch_size=max(1, args.ner_batch_size),
         queue_size=max(8, args.queue_size),
     )
-    build_excel(records, args.output, presidio_ok)
+    build_excel(records, args.output)
     build_json(records, args.output)
 
 

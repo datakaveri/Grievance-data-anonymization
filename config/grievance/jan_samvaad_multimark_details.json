@@ -1,0 +1,40 @@
+{
+  "data_type": "jan_samvaad_multimark_details",
+  "jan_samvaad_multimark_details": {
+    "source_input_path": "data/grievance_unique/jan_samvaad_multimark_details.csv",
+    "free_text_anonymization": {
+      "enabled": true,
+      "columns": [
+        "forwarding_remarks",
+        "reply_attachment",
+        "reply_remarks"
+      ],
+      "staged_input_path": "output/grievance/jan_samvaad_multimark_details/jan_samvaad_multimark_details_fta.csv",
+      "minimum_confidence": 0.75,
+      "on_failure": "fail",
+      "audit_output_path": "output/grievance/jan_samvaad_multimark_details/jan_samvaad_multimark_details_audit.json",
+      "debug": {
+        "enabled": true
+      },
+      "ner_allow_terms": [
+        "ATR",
+        "Jan Samvaad",
+        "CM Jan Samvaad",
+        "CM Window",
+        "सीएम विंडो",
+        "Head Office",
+        "ZP",
+        "हरियाणा सरकार",
+        "Haryana Government",
+        "हरियाणा पुलिस"
+      ],
+      "ner_deny_terms": [
+        "वासुदेव",
+        "भाईराम",
+        "Jagdish",
+        "MAHAN PAL",
+        "गुरमीत"
+      ]
+    }
+  }
+}

@@ -1,0 +1,122 @@
+[
+    {
+        "S.No": 1,
+        "RegNo": "REG2024001",
+        "Name": "Mr. Rahul Sharma",
+        "PhoneNumber": "9876543210",
+        "District": "Gurugram",
+        "Complaint": "Water supply is irregular in our sector for the last three days."
+    },
+    {
+        "S.No": 2,
+        "RegNo": "REG2024002",
+        "Name": "Smt. Sunita Verma",
+        "PhoneNumber": "8765432109",
+        "District": "Rohtak",
+        "Complaint": "Road par bohot potholes hain, please fix it before monsoon."
+    },
+    {
+        "S.No": 3,
+        "RegNo": "REG2024003",
+        "Name": "श्री राकेश कुमार",
+        "PhoneNumber": "7654321098",
+        "District": "Patna",
+        "Complaint": "हमारे क्षेत्र में पिछले एक हफ्ते से बिजली की भारी कटौती हो रही है।"
+    },
+    {
+        "S.No": 4,
+        "RegNo": "REG2024004",
+        "Name": "Master Aarav Gupta",
+        "PhoneNumber": "9988776655",
+        "District": "Pune",
+        "Complaint": "The local playground is filled with garbage and needs cleaning."
+    },
+    {
+        "S.No": 5,
+        "RegNo": "REG2024005",
+        "Name": "Miss Priya Singh",
+        "PhoneNumber": "8877665544",
+        "District": "Lucknow",
+        "Complaint": "Main gate ke paas ki street light pichle do hafte se kaam nahi kar rahi hai."
+    },
+    {
+        "S.No": 6,
+        "RegNo": "REG2024006",
+        "Name": "कुमारी नेहा यादव",
+        "PhoneNumber": "7766554433",
+        "District": "Jaipur",
+        "Complaint": "सरकारी अस्पताल में डॉक्टर समय पर उपलब्ध नहीं रहते हैं।"
+    },
+    {
+        "S.No": 7,
+        "RegNo": "REG2024007",
+        "Name": "Vidwan Chaudhary Om Prakash",
+        "PhoneNumber": "9898989898",
+        "District": "Hisar",
+        "Complaint": "Fasal bima yojana ka paisa abhi tak bank account mein credit nahi hua hai."
+    },
+    {
+        "S.No": 8,
+        "RegNo": "REG2024008",
+        "Name": "Mrs. Kavita Rani",
+        "PhoneNumber": "8787878787",
+        "District": "Faridabad",
+        "Complaint": "The main sewer line is blocked, causing foul smell in the entire neighborhood."
+    },
+    {
+        "S.No": 9,
+        "RegNo": "REG2024009",
+        "Name": "श्री अमित हुड्डा",
+        "PhoneNumber": "7676767676",
+        "District": "Panipat",
+        "Complaint": "Mera electricity bill pichle mahine se double aaya hai, kripya meter check karein."
+    },
+    {
+        "S.No": 10,
+        "RegNo": "REG2024010",
+        "Name": "श्रीमती पूजा देवी",
+        "PhoneNumber": "9191919191",
+        "District": "Bhopal",
+        "Complaint": "नालियों का गंदा पानी सड़क पर बह रहा है जिससे बीमारी फैलने का खतरा है।"
+    },
+    {
+        "S.No": 11,
+        "RegNo": "REG2024011",
+        "Name": "Kumari Anjali Desai",
+        "PhoneNumber": "8282828282",
+        "District": "Ahmedabad",
+        "Complaint": "Stray dog menace in our society is increasing rapidly, threatening child safety."
+    },
+    {
+        "S.No": 12,
+        "RegNo": "REG2024012",
+        "Name": "मास्टर रोहन दास",
+        "PhoneNumber": "7373737373",
+        "District": "Kolkata",
+        "Complaint": "School ke paas subah ke time roz traffic jam ka bahut bada problem ho gaya hai."
+    },
+    {
+        "S.No": 13,
+        "RegNo": "REG2024013",
+        "Name": "Mr. Vikram Hada",
+        "PhoneNumber": "9494949494",
+        "District": "Indore",
+        "Complaint": "Noise pollution from the nearby construction site is violating the night curfew rules."
+    },
+    {
+        "S.No": 14,
+        "RegNo": "REG2024014",
+        "Name": "Mrs. Anita Ahlawat",
+        "PhoneNumber": "8585858585",
+        "District": "Karnal",
+        "Complaint": "Drinking water pressure is very low, upar ke floors par paani bilkul nahi aa raha."
+    },
+    {
+        "S.No": 15,
+        "RegNo": "REG2024015",
+        "Name": "Sri. Suresh Phogat",
+        "PhoneNumber": "7070707070",
+        "District": "Sonipat",
+        "Complaint": "गांव में सड़क निर्माण का कार्य पिछले छह महीने से अधूरा पड़ा है।"
+    }
+]

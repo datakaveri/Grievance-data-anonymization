@@ -166,6 +166,20 @@ settings from the `free_text_anonymization` object in the dataset config:
 | `staged_input_path` | — | Where the anonymized CSV is written (must end in `.csv`). |
 | `audit_output_path` | — | Optional JSON audit of every applied detection. |
 | `on_failure` | `"fail"` | `"fail"` aborts the run on a cell error; `"continue"` records it. |
+| `reference_keywords` | built-in list | Regexes for labels whose number identifies a person's record and which are also ordinary words ("Case No. 78", "मकान नं. 1919"): a "No." marker or a number/year shape (`78/2025`) must follow. The number, and any further numbers of a list ("No. 140 & 141"), are hashed. Replaces `DEFAULT_REFERENCE_KEYWORDS` in `app/main.py`; `[]` turns it off. |
+| `strong_reference_keywords` | built-in list | Labels always followed by their number (FIR, मुकदमा, अभियोग, खसरा, ID…), so the marker is optional ("FIR 140"). Replaces `DEFAULT_STRONG_REFERENCE_KEYWORDS`. |
+| `ner_allow_terms` | `[]` | Dataset-specific terms the models tag but that are not personal ("ATR", "Jan Samvaad"). Matched against the whole entity only, ignoring case, spacing and common spelling variants. Build it from the debug `debug_ner_terms.json` report, but never add officials' names, which also rank high there. |
+| `ner_deny_terms` | `[]` | Names a reviewer confirmed the models miss; always redacted as PERSON wherever they appear as whole words (any case, any spacing). Real names belong here, in the dataset config next to the data, never in the code. |
+
+> **Hardcoded exemptions (temporary):** `HARDCODED_NER_ALLOW_TERMS` in `app/main.py`
+> exempts "Milk", "Mark" and "kindly undetake" in every dataset, on top of
+> `ner_allow_terms`. The models tag "Milk" as a place ("the said Milk Booth") and the
+> verb "Mark" as a name ("Complaint is Mark to CIA-3"), and the general filters
+> deliberately leave both alone: they never clear locations ("Model Town" is plain
+> English) or capitalised names ("Lucky", "Sunny"). "kindly undetake" carries a typo
+> no dictionary knows. The cost is that a person or place called just "Mark" or
+> "Milk" is not redacted. Remove the entries once a general rule covers them.
+| `normalize_source_text` | `true` | Before detection, decode HTML entities (`&#039;`, `&amp;`) and repair invalid Devanagari sign sequences left by legacy-font conversion. The staged CSV carries the cleaned text. |
 
 ### How it scales
 
@@ -193,9 +207,14 @@ It is meant for local inspection, not for the TEE.
 | `enabled` | `false` | Turns on step profiling and per-row attribution. |
 | `include_values` | `true` | Writes the detected PII text into the attribution report. On by default **on this debug branch only** — inspecting a detection you cannot read is guesswork. It writes unredacted PII to disk, so set it to `false` (or do not run this branch) anywhere that matters, such as in the TEE. |
 | `max_rows` | `0` (all) | Cap the rows listed in the attribution report. |
-| `profile_output_path` | `output/debug_profile.json` | Per-step timing and peak RSS. |
-| `attribution_output_path` | `output/debug_detections.json` | Per-row detections, machine-readable. |
-| `attribution_text_path` | `output/debug_detections.txt` | Per-row detections, human-readable. |
+| `profile_output_path` | `<audit>.debug_profile.json` | Per-step timing and peak RSS. |
+| `attribution_output_path` | `<audit>.debug_detections.json` | Per-row detections, machine-readable. |
+| `attribution_text_path` | `<audit>.debug_detections.txt` | Per-row detections, human-readable. |
+| `ner_terms_path` | `<audit>.debug_ner_terms.json` | Most-redacted model-detected strings with their `ner_allow_terms` match key, for curating the allow-list. Written only when `include_values` is on. |
+
+`<audit>` is `audit_output_path` without its extension (or `staged_input_path`
+when no audit is configured), so each config gets its own debug reports —
+e.g. `output/anonymization_audit_sample1ner.debug_detections.json`.
 
 **Profile report** — each model's load, inference and release measured separately,
 with peak RSS sampled during the step rather than read at its edges (a model

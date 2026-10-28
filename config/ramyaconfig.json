@@ -1,0 +1,15 @@
+{
+  "data_type": "my_dataset",
+  "my_dataset": {
+    "source_input_path": "data/PHED_1K.xlsx",
+    "free_text_anonymization": {
+      "enabled": true,
+      "columns": ["complaint_details"],
+      "staged_input_path": "output/ramyacheck.csv",
+      "minimum_confidence": 0.75,
+      "on_failure": "continue",
+      "audit_output_path": "output/ramyacheck1k.json",
+      "debug": { "enabled": true }
+    }
+  }
+}

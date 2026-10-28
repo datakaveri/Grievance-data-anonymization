@@ -13,6 +13,7 @@ beautifulsoup4
 
 # NLP & PII Redaction Engines
 spacy>=3.7.0
+wordfreq>=3.1.0  # everyday-English check in the NER false-positive filter
 presidio-analyzer>=2.2.0
 
 # Text Processing & Utilities

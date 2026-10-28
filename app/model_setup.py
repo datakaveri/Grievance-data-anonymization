@@ -22,7 +22,7 @@ import os
 # ─────────────────────────────────────────────────────────────────────────────
 os.environ["HF_TOKEN"]               = os.getenv("HF_TOKEN", "").strip()
 os.environ["HUGGING_FACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
-
+os.environ["HF_HUB_OFFLINE"] = "1"   # Added to avoid update checks
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 if HF_TOKEN:
     os.environ["HF_TOKEN"]                 = HF_TOKEN
@@ -100,7 +100,7 @@ def prefetch_models(max_workers: int = 3) -> int:
     from transformers import AutoTokenizer, AutoModelForTokenClassification
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from main import _HYBRID_NER_SPECS
+    from main_v3 import _HYBRID_NER_SPECS
 
     token = os.getenv("HF_TOKEN", "").strip() or None
 

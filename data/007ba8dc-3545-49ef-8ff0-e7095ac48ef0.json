@@ -1,0 +1,539 @@
+{
+  "accepted_on": null,
+  "activity_log_details": [
+    {
+      "acted_by_content_type": 45,
+      "acted_by_details": {
+        "id": "19f6072cf6abe22c"
+      },
+      "acted_by_object_id": "19f6072cf6abe22c",
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [],
+      "external_code": null,
+      "extra_remarks": "Complaint archived by Caller_2 with the following characteristics: Reason: ⁠⁠As per the telephonic conversation with the complainant, grievance has been resolved, hence it may be archived\n",
+      "fixed_action_name": "complaint_archived",
+      "id": "4851851e9a32d4bf",
+      "is_hidden": false,
+      "is_system_actioned": false,
+      "modified": "**/04/2026, **:** **",
+      "status": "Closed"
+    },
+    {
+      "acted_by_content_type": 40,
+      "acted_by_details": {
+        "designation_details": {
+          "id": "cb95298ccd436b97",
+          "name": "XEN - Executive Engineer "
+        },
+        "external_code": "PWD_XEN_20",
+        "id": "0f2d82adab08e895"
+      },
+      "acted_by_object_id": "0f2d82adab08e895",
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [
+        {
+          "complaint_activity_log": "173219a8c2cc7a4d",
+          "created": "**/04/2026, **:** **",
+          "id": "bbbe4d40148af92f",
+          "modified": "**/04/2026, **:** **"
+        }
+      ],
+      "external_code": null,
+      "extra_remarks": "Complaint delegation activity approved by Jatin Khurana",
+      "fixed_action_name": "complaint_delegation_activity_approved",
+      "id": "173219a8c2cc7a4d",
+      "is_hidden": false,
+      "is_system_actioned": false,
+      "modified": "**/04/2026, **:** **",
+      "status": "Closed"
+    },
+    {
+      "acted_by_content_type": 40,
+      "acted_by_details": {
+        "designation_details": {
+          "id": "22104aa159e92c88",
+          "name": "SDE-Sub Divisional Engineer"
+        },
+        "external_code": "PWD_SDE_18",
+        "id": "08f7352c405fa311"
+      },
+      "acted_by_object_id": "08f7352c405fa311",
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [],
+      "external_code": null,
+      "extra_remarks": "Complaint delegated to Manoj Kumar by Rajat Mehta",
+      "fixed_action_name": "complaint_delegated",
+      "id": "1fa3f959986e8deb",
+      "is_hidden": false,
+      "is_system_actioned": false,
+      "modified": "**/04/2026, **:** **",
+      "status": "Assigned"
+    },
+    {
+      "acted_by_content_type": 40,
+      "acted_by_details": {
+        "designation_details": {
+          "id": "cb95298ccd436b97",
+          "name": "XEN - Executive Engineer "
+        },
+        "external_code": "PWD_XEN_20",
+        "id": "0f2d82adab08e895"
+      },
+      "acted_by_object_id": "0f2d82adab08e895",
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [],
+      "external_code": null,
+      "extra_remarks": "Complaint delegated to Rajat Mehta by Jatin Khurana",
+      "fixed_action_name": "complaint_delegated",
+      "id": "77f4664a92b41c65",
+      "is_hidden": false,
+      "is_system_actioned": false,
+      "modified": "**/04/2026, **:** **",
+      "status": "Assigned"
+    },
+    {
+      "acted_by_content_type": null,
+      "acted_by_object_id": null,
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [],
+      "external_code": null,
+      "extra_remarks": "Assigned to Jatin Khurana",
+      "fixed_action_name": "complaint_assigned",
+      "id": "bc00dd95a5663dc4",
+      "is_hidden": false,
+      "is_system_actioned": true,
+      "modified": "**/04/2026, **:** **",
+      "status": "Assigned"
+    },
+    {
+      "acted_by_content_type": 12,
+      "acted_by_object_id": "ae5b1d41b2db036d",
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "documents_details": [
+        {
+          "complaint_activity_log": "d34577ad21fceb21",
+          "created": "**/04/2026, **:** **",
+          "id": "37f96c680caf2197",
+          "modified": "**/04/2026, **:** **"
+        }
+      ],
+      "external_code": null,
+      "extra_remarks": "Complaint created by Dharam Singh",
+      "fixed_action_name": "complaint_created",
+      "id": "d34577ad21fceb21",
+      "is_hidden": false,
+      "is_system_actioned": false,
+      "modified": "**/04/2026, **:** **",
+      "status": "Open"
+    }
+  ],
+  "arc_gis_data": {
+    "data": {
+      "GlobalID": "{9DA1D62E-FAD3-4B25-BEFB-611A796C6624}",
+      "OBJECTID": 45865,
+      "Shape.STArea()": 34376.12595628,
+      "Shape.STLength()": 5748.141773728335,
+      "Updated_Remarks": null,
+      "carrriage": 3.66,
+      "circleCode": 205,
+      "created_date": 1688445086000,
+      "created_user": "pwd_hr",
+      "crust": "WBM = 150 mm \nPC = 20 mm ",
+      "date": "5.2016",
+      "department": null,
+      "deptCode": 1,
+      "distCode": 6,
+      "district": "06",
+      "divCode": 18,
+      "dlp__from": "01-05-2021",
+      "dlp_to": "5.202",
+      "enc_userid": null,
+      "estateCode": null,
+      "estateName": null,
+      "gis_length": 2.85374023,
+      "gisid": "4922",
+      "isDlp": "Y",
+      "last_edited_date": 1765941782000,
+      "last_edited_user": "USER",
+      "lengthdoc": 2750.0,
+      "mla_cons": "PC HISAR",
+      "ownership": "PWD B&R",
+      "pwd_cir": "Hisar",
+      "pwd_div": "Provincial Division No. 1 Hisar",
+      "r_temp_id": "4897",
+      "r_temp_id_old": "4897",
+      "rd_name": "Jakhod Khera to Ladvi",
+      "remarks": null,
+      "road_catog": null,
+      "sectorName": null,
+      "smp_rd_width": 6.0,
+      "source": "PWD",
+      "status": "Pending",
+      "temp_road_id": "4939",
+      "tttt": "4922",
+      "type": "PC = 20 mm ",
+      "ur_id": " ",
+      "vs_con": "Adampur",
+      "width": 11.73
+    },
+    "parsed_data": {
+      "current_department": "b5e2d5a83e63f655",
+      "current_department_code": "1",
+      "current_road": "c7ecc553f184be60",
+      "current_road_code": "4897",
+      "department_category_1": "24f0b333e28fe424",
+      "department_category_1_code": "205",
+      "department_category_2": "f704afde6e5dc01a",
+      "department_category_2_code": "18",
+      "district": "fa9f04bc252cd5a9",
+      "district_code": "6",
+      "initial_department": "b5e2d5a83e63f655",
+      "initial_department_code": "1",
+      "initial_road": "c7ecc553f184be60",
+      "initial_road_code": "4897",
+      "is_under_dlp": true
+    },
+    "type": "complaint"
+  },
+  "archived_by_content_type": 45,
+  "archived_by_object_id": "19f6072cf6abe22c",
+  "archived_on": "**/04/2026, **:** **",
+  "assigned_on": "**/04/2026, **:** **",
+  "bg_charge_sheet_required": false,
+  "bg_forfeit_message": null,
+  "bg_forfeiture_escalated": false,
+  "citizen": "ae5b1d41b2db036d",
+  "citizen_details": {
+    "id": "ae5b1d41b2db036d"
+  },
+  "citizen_documents_details": [
+    {
+      "complaint": "55df109cf017e615",
+      "complaint_status": "Open",
+      "created": "**/04/2026, **:** **",
+      "id": "a7759def809caa7c",
+      "modified": "**/04/2026, **:** **",
+      "uploaded_by_content_type": 12,
+      "uploaded_by_object_id": "ae5b1d41b2db036d"
+    }
+  ],
+  "closed_documents_details": [
+    {
+      "complaint": "55df109cf017e615",
+      "complaint_status": "Closed",
+      "created": "**/04/2026, **:** **",
+      "id": "fa04fa10c5919885",
+      "modified": "**/04/2026, **:** **",
+      "uploaded_by_content_type": 40,
+      "uploaded_by_object_id": "0f2d82adab08e895"
+    }
+  ],
+  "closed_on": "**/04/2026, **:** **",
+  "closing_remark": "Repaired",
+  "closing_remark_by": "0f2d82adab08e895",
+  "closing_remarks_reasons_details": null,
+  "complaint_delegations_details": [
+    {
+      "created": "**/02/2026, **:** **",
+      "designation_details": {
+        "id": "22104aa159e92c88",
+        "name": "SDE-Sub Divisional Engineer"
+      },
+      "external_code": "PWD_SDE_18",
+      "modified": "**/02/2026, **:** **"
+    },
+    {
+      "created": "**/02/2026, **:** **",
+      "designation_details": {
+        "id": "2ce6f21be4436edd",
+        "name": "JE - Junior Engineer"
+      },
+      "external_code": "PWD_JE_012",
+      "modified": "**/02/2026, **:** **"
+    }
+  ],
+  "complaint_je_assignee_on": null,
+  "complaint_request": "4a5779c03ff04fc1",
+  "complaint_sdo_assignee_on": null,
+  "complaint_source_device": "Android",
+  "complaint_source_information": {
+    "advertising_id": {},
+    "app": {},
+    "camera_capabilities": {
+      "cameras": [
+        {},
+        {},
+        {},
+        {}
+      ]
+    },
+    "device": {
+      "deviceType": "Android",
+      "platform": "android"
+    },
+    "location": {},
+    "location_confidence": {},
+    "location_settings": {},
+    "network": {},
+    "photo_metadata": [
+      {
+        "resolution": {}
+      }
+    ]
+  },
+  "contractor": "1ff2e81cc1cf7a7b",
+  "contractor_details": {
+    "id": "1ff2e81cc1cf7a7b",
+    "internal_id": "CONUSR-0698"
+  },
+  "created": "**/04/2026, **:** **",
+  "current_assignee": "0f2d82adab08e895",
+  "current_assignee_details": {
+    "designation_details": {
+      "id": "cb95298ccd436b97",
+      "name": "XEN - Executive Engineer "
+    },
+    "external_code": "PWD_XEN_20",
+    "id": "0f2d82adab08e895"
+  },
+  "current_assignee_overdue": null,
+  "current_department": "b5e2d5a83e63f655",
+  "current_department_code": "1",
+  "current_department_details": {
+    "id": "b5e2d5a83e63f655",
+    "name": "PWD"
+  },
+  "current_department_overdue": null,
+  "current_road": "c7ecc553f184be60",
+  "current_road_code": "4897",
+  "current_road_details": {
+    "code": "4897",
+    "id": "c7ecc553f184be60",
+    "name": "Jakhod Khera to Ladvi"
+  },
+  "defect_flag": null,
+  "department_category_1": "24f0b333e28fe424",
+  "department_category_1_code": "205",
+  "department_category_1_details": {
+    "code": "205",
+    "id": "24f0b333e28fe424",
+    "name": "Hisar"
+  },
+  "department_category_2": "f704afde6e5dc01a",
+  "department_category_2_code": "18",
+  "department_category_2_details": {
+    "code": "18",
+    "id": "f704afde6e5dc01a",
+    "name": "Provincial Division No. 1 Hisar"
+  },
+  "department_log_details": [
+    {
+      "complaint": "55df109cf017e615",
+      "created": "**/04/2026, **:** **",
+      "department": "b5e2d5a83e63f655",
+      "department_details": {
+        "code": "1",
+        "created": "**/01/2026, **:** **",
+        "description": "Public Works Department",
+        "id": "b5e2d5a83e63f655",
+        "internal_id": "DEPT-0001",
+        "modified": "**/04/2026, **:** **",
+        "name": "PWD",
+        "owner": "e2221fd774d561a5",
+        "prefix": "DEPT",
+        "saral_application_code": "3",
+        "saral_dept_code": "PWD",
+        "saral_service_code": "05",
+        "sequence_number": 1,
+        "state": "00f751c9e042f743",
+        "state_details": {
+          "code": "HRY",
+          "id": "00f751c9e042f743",
+          "name": "Haryana"
+        }
+      },
+      "id": "784b7ef689e93c00",
+      "is_overdue": false,
+      "is_transfer_acceptance_delayed": false,
+      "is_transferred_back": false,
+      "modified": "**/04/2026, **:** **",
+      "overdue_baseline_at": null,
+      "overdue_count": 0,
+      "previous_department": null,
+      "transferred_back_on": null,
+      "transferred_back_to": null
+    }
+  ],
+  "district": "fa9f04bc252cd5a9",
+  "district_code": "6",
+  "district_details": {
+    "code": "6",
+    "created": "**/01/2026, **:** **",
+    "id": "fa9f04bc252cd5a9",
+    "latitude": 29.156269,
+    "longitude": 75.72923,
+    "modified": "**/03/2026, **:** **",
+    "name": "Hisar",
+    "saral_district_code": "0080",
+    "state": "00f751c9e042f743"
+  },
+  "dlp_overdue_days": 0,
+  "dlp_segment": "644ed30b23693e3a",
+  "dlp_segment_details": {
+    "expiry_date": "31 December 2026",
+    "from_rd_m": 0.0,
+    "id": "644ed30b23693e3a",
+    "status": "Active",
+    "to_rd_m": 2856.47749
+  },
+  "dlp_segment_snapshot": {
+    "contractor": "1ff2e81cc1cf7a7b",
+    "contractor_details": {
+      "created": "**/02/2026, **:** **",
+      "id": "1ff2e81cc1cf7a7b",
+      "internal_id": "CONUSR-0698",
+      "modified": "**/02/2026, **:** **",
+      "no_of_roads": 63,
+      "prefix": "CONUSR",
+      "sequence_number": 698,
+      "user": "589903cb93d3742a",
+      "user_id": "589903cb93d3742a",
+      "user_permissions": []
+    },
+    "created": "**/09/2026, **:** **",
+    "created_by": "0fb4b0c7d7333fc8",
+    "department": "b5e2d5a83e63f655",
+    "department_road": "0cd997ba8903d53d",
+    "expiry_date": "31 December 2026",
+    "from_rd_m": "0E-10",
+    "id": "644ed30b23693e3a",
+    "modified": "**/09/2026, **:** **",
+    "road": "c7ecc553f184be60",
+    "status": "Active",
+    "to_rd_m": "2856.4774900000"
+  },
+  "documents_details": [
+    {
+      "complaint": "55df109cf017e615",
+      "complaint_status": "Closed",
+      "created": "**/04/2026, **:** **",
+      "id": "fa04fa10c5919885",
+      "modified": "**/04/2026, **:** **",
+      "uploaded_by_content_type": 40,
+      "uploaded_by_object_id": "0f2d82adab08e895"
+    },
+    {
+      "complaint": "55df109cf017e615",
+      "complaint_status": "Open",
+      "created": "**/04/2026, **:** **",
+      "id": "a7759def809caa7c",
+      "modified": "**/04/2026, **:** **",
+      "uploaded_by_content_type": 12,
+      "uploaded_by_object_id": "ae5b1d41b2db036d"
+    }
+  ],
+  "flags_details": "Under DLP, Road Repeated",
+  "id": "55df109cf017e615",
+  "in_progress_on": null,
+  "initial_assignee": "0f2d82adab08e895",
+  "initial_assignee_details": {
+    "designation_details": {
+      "id": "cb95298ccd436b97",
+      "name": "XEN - Executive Engineer "
+    },
+    "external_code": "PWD_XEN_20",
+    "id": "0f2d82adab08e895"
+  },
+  "initial_assignee_overdue": null,
+  "initial_department": "b5e2d5a83e63f655",
+  "initial_department_code": "1",
+  "initial_department_details": {
+    "id": "b5e2d5a83e63f655",
+    "name": "PWD"
+  },
+  "initial_department_overdue": null,
+  "initial_road": "c7ecc553f184be60",
+  "initial_road_code": "4897",
+  "initial_road_details": {
+    "code": "4897",
+    "id": "c7ecc553f184be60",
+    "name": "Jakhod Khera to Ladvi"
+  },
+  "internal_id": "COMP-81520",
+  "invalid_count": 0,
+  "invalid_verified_on": null,
+  "invalidated_on": null,
+  "is_acceptance_delayed": false,
+  "is_assignment_delay": false,
+  "is_category_owner_assinged": true,
+  "is_closed_by_delegated_user": true,
+  "is_complaint_archived": true,
+  "is_complaint_overdue": false,
+  "is_dlp_exempted": false,
+  "is_dlp_update_requested": false,
+  "is_invalid": false,
+  "is_invalid_verified": false,
+  "is_major": false,
+  "is_major_complaint_target_date_extended": false,
+  "is_major_minor_update_requested": false,
+  "is_on_same_road": true,
+  "is_outside_transfer_update_requested": false,
+  "is_reopen_acceptance_delayed": false,
+  "is_reopened": false,
+  "is_reopened_by_citizen": false,
+  "is_reopened_by_department": false,
+  "is_reopened_by_government": false,
+  "is_road_updated": false,
+  "is_transfer_update_requested": false,
+  "is_transferred": false,
+  "is_transferred_back": false,
+  "is_transferred_outside_department": false,
+  "is_transferred_within_department": false,
+  "is_under_dlp": true,
+  "is_user_transfer": false,
+  "is_within_transfer_update_requested": false,
+  "issue_resolved_no_count_by_citizen": 0,
+  "issue_resolved_yes_count_by_citizen": 0,
+  "location_not_reachable": false,
+  "lowest_department_category": "f704afde6e5dc01a",
+  "lowest_department_category_details": {
+    "code": "18",
+    "id": "f704afde6e5dc01a",
+    "name": "Provincial Division No. 1 Hisar"
+  },
+  "major_complaint_target_date_extended_count": 0,
+  "modified": "**/09/2026, **:** **",
+  "overdue_count": 0,
+  "prefix": "COMP",
+  "remarks": "लाडवी जाखोद खेड़ा रोड़ जगह जगह से टूटा हुआ है।",
+  "reopened_count": 0,
+  "reopened_on": null,
+  "sequence_number": 81520,
+  "status": "Closed",
+  "target_date": null,
+  "timeline": [
+    {
+      "date": "**/04/2026, **:** **",
+      "documents": [],
+      "status": "Open"
+    },
+    {
+      "date": "**/04/2026, **:** **",
+      "documents": [],
+      "status": "Assigned"
+    },
+    {
+      "date": "**/04/2026, **:** **",
+      "documents": [],
+      "status": "Closed"
+    }
+  ],
+  "transferred_count": 0,
+  "transferred_on": null
+}
