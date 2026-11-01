@@ -1,296 +1,243 @@
-# 🛡️ Grievance Data PII Anonymization & High-Performance NER Evaluation Pipeline
+# Grievance Data PII Anonymization
 
-A production-ready, unified processing pipeline for **multi-format grievance analysis, language identification, multi-category PII detection (Regex + Presidio), automated contextual redaction, and parallel multi-model Named Entity Recognition (NER) benchmarking**.
+Removes personal data from free-text grievance records written in English, Hindi
+(Devanagari) and romanised Hindi, before the data is handed to SKALD. Two kinds of
+detector work together:
 
-Built to process administrative, medical, and public grievance documents in **English, Indic scripts (Hindi/Devanagari, Bengali, Tamil, Telugu), and Mixed languages**.
+* **Rules (regex)** for structured identifiers: Aadhaar, PAN, phone numbers (+91),
+  Haryana family IDs (PPP), FIR / case / land-record numbers, dates, e-mail, bank
+  accounts, and a catch-all for ID-shaped codes.
+* **NER models** for names, places and organisations: `ai4bharat/IndicNER` and
+  `Davlan/xlm-roberta-base-ner-hrl`, merged per line, with filters that keep
+  everyday words ("ATR", "complainant", "Sir") from being hidden as names.
 
----
-
-## 🌟 Key Features
-
-1. **High-Performance Queue-Driven Parallel NER Pipeline (`app/main.py`)**:
-   - Multi-threaded fan-out / fan-in worker architecture processing models in parallel.
-   - **Optimized CPU Execution**: Runs cleanly on CPU (`CUDA_VISIBLE_DEVICES=""`) with zero CUDA driver probing warnings or delays.
-   - **Rust Multi-Threaded Downloads (`hf_transfer`)**: Accelerates HuggingFace model weight downloads by **5x to 10x**.
-   - **Autograd Memory Reduction (`torch.inference_mode()`)**: Eliminates PyTorch tensor tracking overhead on CPU forward passes.
-   - **Smart Single-Pass True-Casing & Line Pre-Filtering**: Cuts inference passes in half and filters out short non-text noise (< 3 characters).
-
-2. **Multi-Format Document & Inline Text String Input Support**:
-   - Reads `.txt`, `.docx`, `.doc`, `.html`, `.json`, and `.csv` files (single file or entire directory).
-   - Supports direct **inline text string analysis** via command-line argument (`--text "Your text here"`).
-
-3. **Automatic Script & Language Detection**:
-   - Classifies document languages into **Hindi (Devanagari)**, **Bengali**, **Tamil**, **Telugu**, **English**, **Mixed**, or **Unknown**.
-
-4. **Structured & Contextual PII Detection Engine**:
-   - Labeled and unlabelled pattern scanning with false-positive filtering.
-   - **20+ PII Categories**:
-     - *Government & Identifiers*: Aadhaar Number, PAN Card, Voter ID, Passport Number, Driving License, Parivar Pehchan Patra (PPP / Family ID), User ID / Portal ID.
-     - *Financial*: Bank Account Number (with context validation), Credit / Debit Card Number, IFSC Code.
-     - *Contact & Network*: Phone Number, Email Address, IP Address.
-     - *Administrative & Location*: Indian Cities / Districts (e.g., Karnal, Jhajjar, Rohtak, Gurugram, Delhi), Pin Codes.
-     - *Personal Particulars*: Person Names with Honorifics (*Shri*, *Smt.*, *Dr.*, *Prof.*), Date of Birth (DOB), Age.
-
-5. **Granular Word & Character Position Tracking**:
-   - Computes **Line No**, **Word No**, **Word Position** (ordinal: `1st`, `2nd`, `3rd`), **Start Letter** & **End Letter** character offsets, and **Letter Span** (`12-24`).
-   - Includes **Confidence Scores** (`1.00 (Exact Regex)` or model prediction probabilities).
-
-6. **Privacy-Preserving Anonymization Strategies**:
-   - **Partial Masking**: Aadhaar (`XXXX XXXX 1234`), Phone (`XXXXXX9876`), Bank Account (`********5678`), PAN (`ABCDE****F`).
-   - **Domain-Preserving Masking**: Email (`jo****@domain.com`).
-   - **Tokenization**: Credit Card (`XXXX-XXXX-XXXX-4321`).
-   - **Initial-Only Masking**: Person Names (`R. K. S.`).
-   - **One-Way Hashing**: SHA-256 hash for generic tokens.
-
-7. **Multilingual NER Ensemble**:
-   Uses three models for multilingual entity extraction:
-   - **HiNER**: `cfilt/HiNER-original-muril-base-cased` (IIT Bombay / MuRIL)
-   - **IndicNER**: `ai4bharat/IndicNER` (AI4Bharat Multilingual)
-   - **XLM-RoBERTa**: `Babelscape/wikineural-multilingual-ner` (Multilingual)
-   - **Hybrid**: Ensemble of HiNER + IndicNER + XLM-RoBERTa.
-
-8. **Multi-Report Output System (Excel & Per-Model JSONs)**:
-   - **4-Sheet Color-Coded Excel Workbook**:
-     - *Sheet 1: Summary*: Overview of processed files, script language, total PII hits, and detection status.
-     - *Sheet 2: PII Detection*: Detailed audit log of detected PII with line numbers, word positions, letter spans, detector source, display names, and XML tags.
-     - *Sheet 3: NER Comparison*: Model-by-model comparison of predicted types (`PERSON`, `LOCATION`, `ORGANIZATION`), extracted entity text, and strict missed entity computation.
-     - *Sheet 4: Anonymization*: Complete record of original values vs anonymized output, confidence scores, position metrics, redaction technique, and description.
-   - **Per-Model JSON Reports**: Automatically generates a master JSON report (`pii_ner_report.json`) as well as separate model-specific JSON files (`pii_ner_report_HiNER.json`, `pii_ner_report_IndicNER.json`, `pii_ner_report_Hybrid.json`, etc.).
+Everything runs locally on CPU. No text is sent to any external service.
 
 ---
 
-## 📂 Project Structure
+## How the code is organised
+
+The code has three layers. Entry scripts only parse the command line. A **job**
+handles one input shape: it reads the input into `(column, text)` pairs, hands
+them to the **pipeline**, and writes each result back where it came from. The
+pipeline (`anonymizer/pipeline.py`) is the one place where the flow is written
+out, and each of its four steps is one module. Region-specific knowledge is kept
+in separate rule files.
 
 ```text
-Grievance-data-anonymization/
-├── app/
-│   ├── main.py              # Main parallel PII/NER pipeline execution script
-│   ├── batch_pipeline.py    # Config-driven dataset batch mode for downstream SKALD integration
-│   └── model_setup.py       # Dependency setup & HuggingFace model downloader
-├── data/                    # Input folder for document datasets (.txt, .docx, .doc, .html, .json, .csv)
-├── output/                  # Output directory for generated Excel (.xlsx) and JSON (.json) reports
-├── Dockerfile               # Production Docker container definition
-├── docker-compose.yml       # Docker Compose configuration with volume mounts
-├── requirements.txt         # Python dependency specifications
-└── README.md                # Pipeline documentation
+app/
+├── batch_pipeline.py        Entry: anonymize table columns (Docker ENTRYPOINT) -> jobs/table.py
+├── json_remarks.py          Entry: anonymize "remarks" fields of nested JSON  -> jobs/nested_json.py
+├── ner_report.py            Entry: NER comparison report (Excel + JSON), redacts nothing
+├── model_setup.py           Entry: download the NER models into the HF cache (Docker build)
+│
+├── anonymizer/
+│   ├── jobs/                JOBS — one per input shape
+│   │   ├── table.py            table columns -> staged CSV for SKALD + audit JSON
+│   │   └── nested_json.py      *remark* fields of nested JSON -> same JSON + report
+│   ├── config.py            find / validate the dataset config (DetectionSettings, TableJobSettings)
+│   │
+│   ├── pipeline.py          PIPELINE — the flow, steps 1-4, once per distinct value
+│   ├── cleanup.py           1. clean source text (HTML entities, broken legacy-font Hindi)
+│   ├── rules/               2. WHAT the regex detectors look for
+│   │   ├── generic.py          e-mail, card, IP, numeric dates, user/patient IDs, age, deny list
+│   │   ├── india.py            Aadhaar, PAN, DL, vehicle, voter ID, passport, bank, IFSC, UPI,
+│   │   │                       GSTIN, ABHA, phones, Hindi dates, reference numbers, catch-all IDs,
+│   │   │                       PIN codes, Hindi word lists
+│   │   ├── haryana.py          PPP family ID, Haryana record words, Haryana NER exemptions
+│   │   └── __init__.py         the order the rules run in (it decides ties)
+│   ├── scanner.py           2. HOW: run the rules over each line
+│   ├── ner/                 3. model detection
+│   │   ├── models.py           model registry, loading, runtime knobs
+│   │   ├── inference.py        batching, long-line chunking, whole-corpus passes
+│   │   ├── spans.py            whole-word snapping, cleanup, merging both models
+│   │   ├── filters.py          clear titles, grammar words, everyday vocabulary, allow-lists
+│   │   └── index.py            infer each distinct line once, map entities back onto cells
+│   ├── redaction.py         4. pool rule + model detections, apply the per-type policy
+│   ├── text.py                 shared helpers (word positions, Indic word characters, scripts)
+│   └── debug/                  profiling.py (step timing, peak memory), reports.py (debug reports)
+│
+└── report/                  The NER comparison report (reuses steps 2 and 3)
+    ├── readers.py           TXT / DOCX / HTML / JSON / CSV -> text
+    ├── parallel_ner.py      one worker thread per model
+    ├── writers.py           4-sheet Excel workbook + per-model JSON
+    ├── records.py           report data model
+    └── cli.py               command line
+
+config/grievance/            Haryana grievance dataset configs (one per table) + order.txt
+tests/                       unittest suite: every rule's documented examples, and the pipeline steps
 ```
+
+Every regex rule carries a comment with what it matches, an example it catches,
+what it deliberately leaves alone, and why it exists. `#NN` in a comment refers to
+the issue number in the reviewer's sheet (`data/ner_issues/ner_issues.xlsx`) that
+motivated it.
+
+### What happens to a cell
+
+1. **Cleanup** (`cleanup.py`) — `&#039;` becomes `'`; invalid Devanagari sign
+   sequences from legacy-font conversion are repaired (`शिक्ष़्ाा` → `शिक्षा`).
+2. **Rules** (`scanner.py`, `rules/`) — every rule runs on every line, in a fixed
+   order. Devanagari digits are read as ASCII digits.
+3. **Models** (`ner/`) — each *distinct* line of the dataset is run through both
+   models once. Spans are grown to whole words (Hindi vowel signs included), cleaned,
+   merged across models, and filtered for false positives.
+4. **Redaction** (`redaction.py`) — rule and model detections are pooled; overlapping
+   ones become one replacement. Its policy comes from a detection that covers the whole
+   span (rules before models, specific rules before broad ones); if none does, the span
+   becomes `*`, so a partial mask is never applied to text it was not made for.
+
+| Detected type | Replacement |
+| :--- | :--- |
+| Person, location, organisation, phone | `*` |
+| Aadhaar | `XXXX XXXX 0124` |
+| PAN | `ABCDE****F` |
+| Bank account | `******0000` |
+| Card | `XXXX-XXXX-XXXX-1111` |
+| E-mail | `ra****@gmail.com` |
+| Date | `XX-XX-2025` (year kept) |
+| PIN code | `132XXX` |
+| Age | kept |
+| Everything else (PPP / Voter ID / reference and ID numbers / IFSC / UPI …) | SHA-256 of a per-column random salt + value |
 
 ---
 
-## ⚡ Quickstart Guide
+## Quick start
 
-### Option 1: Local Setup (Native Python)
-
-#### Prerequisites
-- Python 3.10+
-- PyTorch (CPU or CUDA)
-
-#### Steps:
 ```bash
-# 1. Clone repository
-git clone https://github.com/datakaveri/Grievance-data-anonymization.git
-cd Grievance-data-anonymization
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+export HF_TOKEN=...                # needed once to download the gated ai4bharat/IndicNER
+python app/model_setup.py          # caches both models
 
-# 2. Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Anonymize a table (see "Table job" for the config)
+python app/batch_pipeline.py --config config/config.json
 
-# 3. Pre-download NER models (HiNER, IndicNER, XLM-RoBERTa)
-python app/model_setup.py
+# Remarks fields of nested JSON records
+python app/json_remarks.py data/ --out output/json_remarks \
+    --config config/grievance/jan_samvaad_reminders.json
 
-# 4. Create data and output directories
-mkdir -p app/data app/output
+# Compare what each model finds (Excel + JSON report)
+python app/ner_report.py --input path/to/documents/ --output output/report.xlsx
+python app/ner_report.py --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123" --output output/inline.xlsx
 
-# 5. Run High-Performance Parallel Pipeline on input folder or file
-python app/main.py --input app/data/sample_complaint.txt --output app/output/pii_ner_report.xlsx
-
-# 6. OR Run pipeline directly on an inline text string
-python app/main.py --text "Shri Ramesh Kumar, Aadhaar 2345 6789 0123, email: ramesh@example.com" --output app/output/inline_report.xlsx
+# Tests (no models needed, a few seconds)
+python -m unittest discover -s tests
 ```
 
----
-
-### Option 2: Running with Docker
-
-#### 1. Build Docker Image
-```bash
-docker build -t grievance-anonymizer:latest .
-```
-
-#### 2. Run Container
-```bash
-docker run --rm \
-  -v $(pwd)/app/data:/app/data \
-  -v $(pwd)/app/output:/app/output \
-  grievance-anonymizer:latest
-```
-
----
-
-### Option 3: Running with Docker Compose
+### Docker
 
 ```bash
-# 1. Create data and output directories
-mkdir -p app/data app/output
-
-# 2. Build and launch container
-docker compose up --build
+DOCKER_BUILDKIT=1 docker build --secret id=hf_token,env=HF_TOKEN -t grievance-anonymizer .
+docker run --rm -v $(pwd)/config:/app/config:ro -v $(pwd)/data:/app/data \
+    -v $(pwd)/output:/app/output grievance-anonymizer
+# or: docker compose up --build
 ```
 
----
-
-## ⚙️ Command Line Arguments (`app/main.py`)
-
-| Argument | Short Flag | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--input` | `-i` | `app/data/sample_complaint.txt` | Path to a single file (`.txt`/`.docx`/`.doc`/`.html`/`.json`/`.csv`) or folder containing documents. |
-| `--text` | `-t` | `None` | Inline text string to analyze directly instead of reading files. |
-| `--output` | `-o` | `pii_ner_report.xlsx` | Output `.xlsx` file path (JSON reports generated automatically). |
-| `--ner-batch-size` | | `24` | Batch size for parallel line inference across model workers. |
-| `--queue-size` | | `64` | Maximum queue size for bounded dispatcher backpressure. |
-| `--hf_token` | | `""` | Optional HuggingFace Access Token for gated models. |
+The container runs the table job on the config it finds in `/app/config`.
 
 ---
 
-## 🗃️ Dataset Batch Job (`app/batch_pipeline.py`)
+## Table job (`app/batch_pipeline.py` → `anonymizer/jobs/table.py`)
 
-The batch job anonymizes configured columns of a CSV/XLSX/JSON dataset. It reads its
-settings from the `free_text_anonymization` object in the dataset config:
+Anonymizes configured columns of a CSV / XLSX / JSON table. Settings live in the
+`free_text_anonymization` object of the dataset config:
 
 | Config key | Default | Description |
 | :--- | :---: | :--- |
 | `enabled` | — | Must be `true` for the job to write a staged file. |
-| `columns` | — | List of column names to anonymize. All must exist in the input. |
-| `minimum_confidence` | `0.0` | Detections below this confidence are ignored. |
-| `ner_batch_size` | `256` | Lines handed to each inference call. Affects progress reporting granularity, not throughput. |
+| `columns` | — | Columns to anonymize. All must exist in the input. |
 | `staged_input_path` | — | Where the anonymized CSV is written (must end in `.csv`). |
-| `audit_output_path` | — | Optional JSON audit of every applied detection. |
-| `on_failure` | `"fail"` | `"fail"` aborts the run on a cell error; `"continue"` records it. |
-| `reference_keywords` | built-in list | Regexes for labels whose number identifies a person's record and which are also ordinary words ("Case No. 78", "मकान नं. 1919"): a "No." marker or a number/year shape (`78/2025`) must follow. The number, and any further numbers of a list ("No. 140 & 141"), are hashed. Replaces `DEFAULT_REFERENCE_KEYWORDS` in `app/main.py`; `[]` turns it off. |
-| `strong_reference_keywords` | built-in list | Labels always followed by their number (FIR, मुकदमा, अभियोग, खसरा, ID…), so the marker is optional ("FIR 140"). Replaces `DEFAULT_STRONG_REFERENCE_KEYWORDS`. |
-| `ner_allow_terms` | `[]` | Dataset-specific terms the models tag but that are not personal ("ATR", "Jan Samvaad"). Matched against the whole entity only, ignoring case, spacing and common spelling variants. Build it from the debug `debug_ner_terms.json` report, but never add officials' names, which also rank high there. |
-| `ner_deny_terms` | `[]` | Names a reviewer confirmed the models miss; always redacted as PERSON wherever they appear as whole words (any case, any spacing). Real names belong here, in the dataset config next to the data, never in the code. |
+| `audit_output_path` | — | Optional JSON audit of every replacement. |
+| `minimum_confidence` | `0.0` | Model detections below this are ignored (the grievance configs use `0.75`). |
+| `on_failure` | `"fail"` | `"fail"` aborts on a cell error; `"continue"` records it. |
+| `ner_batch_size` | `256` | Lines per inference call — progress granularity only. |
+| `normalize_source_text` | `true` | Run the cleanup step. The staged CSV carries the cleaned text. |
+| `reference_keywords` | built-in | Regexes for record labels that are also ordinary words ("Case No. 45", "मकान नं. 1919"): a "No." marker or a number/year shape (`45/2025`) must follow. The number, and further numbers of a list ("No. 140 & 141"), are hashed. Replaces the default list (India + Haryana, see `rules/`); `[]` turns it off. |
+| `strong_reference_keywords` | built-in | Labels always followed by their number (FIR, मुकदमा, अभियोग, खसरा, ID…): the marker is optional ("FIR 140"). |
+| `ner_allow_terms` | `[]` | Local terms the models tag that are never personal ("ATR", "Jan Samvaad"). Matched against the whole entity, ignoring case, spacing and common spelling variants. Build it from the debug `debug_ner_terms.json` report — but never add officials' names, which also rank high there. |
+| `ner_deny_terms` | `[]` | Names a reviewer confirmed the models miss; always redacted as PERSON wherever they appear as whole words. Real names belong here, in the config next to the data, never in code. |
 
-> **Hardcoded exemptions (temporary):** `HARDCODED_NER_ALLOW_TERMS` in `app/main.py`
-> exempts "Milk", "Mark" and "kindly undetake" in every dataset, on top of
-> `ner_allow_terms`. The models tag "Milk" as a place ("the said Milk Booth") and the
-> verb "Mark" as a name ("Complaint is Mark to CIA-3"), and the general filters
-> deliberately leave both alone: they never clear locations ("Model Town" is plain
-> English) or capitalised names ("Lucky", "Sunny"). "kindly undetake" carries a typo
-> no dictionary knows. The cost is that a person or place called just "Mark" or
-> "Milk" is not redacted. Remove the entries once a general rule covers them.
-| `normalize_source_text` | `true` | Before detection, decode HTML entities (`&#039;`, `&amp;`) and repair invalid Devanagari sign sequences left by legacy-font conversion. The staged CSV carries the cleaned text. |
+`source_input_path` (in the dataset object) points at the input; without it the job
+uses the single data file in `data/`, as SKALD does.
+
+> **Hardcoded exemptions (temporary).** `NER_ALLOW_TERMS` in
+> `app/anonymizer/rules/haryana.py` exempts "Milk", "Mark" and "kindly undetake" in
+> every dataset. The models tag "Milk" as a place ("the said Milk Booth") and the verb
+> "Mark" as a name ("Complaint is Mark to CIA-3"); the general filters deliberately
+> leave both alone because they never clear locations ("Model Town" is plain English)
+> or capitalised names ("Lucky", "Sunny"). "kindly undetake" carries a typo no
+> dictionary knows. The cost: a person or place called just "Mark" or "Milk" is not
+> redacted. Remove an entry once a general rule covers it.
 
 ### How it scales
 
-NER runs **once over the whole job**, not once per cell. The job collects every
-distinct line across the configured columns, infers each one exactly once in real
-mini-batches, then projects the spans back onto every cell containing that line.
-On a real grievance export roughly four in five complaint bodies are duplicates, so the
-deduplication alone removes most of the work; the batching removes most of the rest.
-
-Models are loaded one at a time and released after their pass, so peak memory is
-roughly one model (~1 GB) rather than three.
+NER runs **once over the whole job**, not once per cell: every distinct line across
+the configured columns is inferred exactly once in real mini-batches and projected
+back onto every cell containing it. On a real grievance export roughly four in five
+complaint bodies are duplicates, so deduplication removes most of the work. Models
+load one at a time and are released after their pass, so peak memory is about one
+model (~1 GB).
 
 ### Debug instrumentation
 
-Set `debug.enabled` in the `free_text_anonymization` block (or `ANON_DEBUG=1`) to
-write two extra reports. Profiling is off by default and costs nothing when off —
-the normal run is byte-identical with it disabled.
-
-This is the `debug-instrumentation` branch: once debugging is on it includes the
-detected PII text in the report, because that is what makes a detection readable.
-It is meant for local inspection, not for the TEE.
+Set `debug.enabled` in the `free_text_anonymization` block (or `ANON_DEBUG=1`).
+Off by default and free when off.
 
 | Debug key | Default | Description |
 | :--- | :---: | :--- |
-| `enabled` | `false` | Turns on step profiling and per-row attribution. |
-| `include_values` | `true` | Writes the detected PII text into the attribution report. On by default **on this debug branch only** — inspecting a detection you cannot read is guesswork. It writes unredacted PII to disk, so set it to `false` (or do not run this branch) anywhere that matters, such as in the TEE. |
+| `enabled` | `false` | Step profiling, per-row attribution and the NER-term report. |
+| `include_values` | `true` | Write the detected PII text into the reports. **This writes unredacted personal data to disk** — set it to `false`, or leave debugging off, anywhere that matters, such as in the TEE. |
 | `max_rows` | `0` (all) | Cap the rows listed in the attribution report. |
-| `profile_output_path` | `<audit>.debug_profile.json` | Per-step timing and peak RSS. |
+| `profile_output_path` | `<audit>.debug_profile.json` | Per-step and per-model time and peak RSS. |
 | `attribution_output_path` | `<audit>.debug_detections.json` | Per-row detections, machine-readable. |
 | `attribution_text_path` | `<audit>.debug_detections.txt` | Per-row detections, human-readable. |
-| `ner_terms_path` | `<audit>.debug_ner_terms.json` | Most-redacted model-detected strings with their `ner_allow_terms` match key, for curating the allow-list. Written only when `include_values` is on. |
+| `ner_terms_path` | `<audit>.debug_ner_terms.json` | Most-redacted model strings with their allow-list key (needs `include_values`). |
 
-`<audit>` is `audit_output_path` without its extension (or `staged_input_path`
-when no audit is configured), so each config gets its own debug reports —
-e.g. `output/anonymization_audit_sample1ner.debug_detections.json`.
-
-**Profile report** — each model's load, inference and release measured separately,
-with peak RSS sampled during the step rather than read at its edges (a model
-allocates and frees inside a step, so boundary readings miss the spike that
-decides whether the job fits in memory):
-
-```
-  [profile] load:    HiNER (IIT Bombay / MuRIL)     2.74s  peak  905.6 MB  delta  +87.6 MB
-  [profile] infer:   HiNER (IIT Bombay / MuRIL)     5.60s  peak 1317.9 MB  delta +398.0 MB
-  [profile] release: HiNER (IIT Bombay / MuRIL)     0.27s  peak 1291.9 MB  delta -389.6 MB
-```
-
-The JSON adds `ms_per_line` per model, so the three are directly comparable.
-
-**Attribution report** — what was detected in each row, and which detector found
-it. A detection claimed by two models is listed under both:
+`<audit>` is `audit_output_path` without its extension. Example attribution lines:
 
 ```
 Row 2
-    [complaint_details] Aadhaar '3737 7373 3737'  <- Regex  (conf 1.00, partial_mask)
-    [complainant_address] LOCATION 'MOHRA'  <- XLM-RoBERTa  (conf 0.84, suppress)
-    [complainant_name] PERSON 'HARMESH KUMAR'  <- XLM-RoBERTa, HiNER  (conf 0.93, suppress)
+    [remarks] PERSON 'Amit Sharma'  <- XLM-RoBERTa, IndicNER  (conf 1.00, suppress)
+    [remarks] Phone_Number '98765 43210'  <- Regex  (conf 1.00, suppress)
 ```
 
-Attribution is recovered by overlap: the merge step pools every model's spans, so
-a merged entity no longer records its origin, and a model whose raw span covers
-the same characters is taken to have found it.
+A model hit names the model(s) whose raw span overlaps the merged entity.
 
 ### Environment variables
 
 | Variable | Default | Description |
 | :--- | :---: | :--- |
-| `HF_TOKEN` | `""` | Required for the gated `ai4bharat/IndicNER` repo. Without it that model is skipped (the run still completes with the other two, so check the logs if you expect all three). |
-| `NER_CORPUS_BATCH_SIZE` | `256` | Lines per inference call — progress granularity only, overridden by `ner_batch_size` in config. |
-| `NER_TENSOR_BATCH_SIZE` | `0` (auto) | Tensor batch size. Sequences pad to the batch's longest, so bigger is not better and the optimum tracks the core count — auto picks `max(8, 4 x threads)`. Measured on a reference grievance corpus at 2 threads: 43 ms/line at 8, 52 at 16, 63 unbatched, 64 at 32. Pin an explicit value to override, or `1` to disable batching. |
-| `NER_TORCH_THREADS` | `0` (leave as-is, i.e. 4) | Torch CPU threads for the batch job. Tune per machine — on a hybrid-core laptop CPU, raising it measured *slower*, so benchmark before changing it. |
-| `NER_QUANTIZE` | unset | Dynamic INT8 quantization. **Not recommended for production anonymization.** Measured on a reference grievance corpus it is ~1.5x faster (90 → 59 ms/line) but changes what is detected: 386 entities found against fp32's 481, only 290 in common. Missing a fifth of the names and locations is a privacy failure, not a tuning trade-off. |
+| `HF_TOKEN` | `""` | Needed to download the gated `ai4bharat/IndicNER`. Without it the model is skipped and the job runs with XLM-RoBERTa alone — check the log. |
+| `NER_CORPUS_BATCH_SIZE` | `256` | Lines per inference call (progress granularity); `ner_batch_size` overrides it. |
+| `NER_TENSOR_BATCH_SIZE` | `0` (auto) | Sequences per forward pass. They pad to the batch's longest, so bigger is not better; auto picks `max(8, 4 × threads)`. Measured at 2 threads: 43 ms/line at 8, 52 at 16, 63 unbatched, 64 at 32. `1` disables batching. |
+| `NER_TORCH_THREADS` | `0` (keep 4) | Torch CPU threads. Benchmark before raising it — on a hybrid-core laptop CPU more threads measured slower. |
+| `NER_QUANTIZE` | unset | Dynamic INT8 quantization. **Not for production anonymization**: ~1.5× faster but it found 386 entities where fp32 found 481 (only 290 shared) — a fifth of names and places unmasked. |
+| `ANON_DEBUG` | unset | `1` turns on debug instrumentation without editing the config. |
+
+### Performance
+
+Measured on a reference grievance export (6,000 rows, 17,913 cells, 7,833 distinct
+lines), CPU only: per-cell NER took 2,032 s, corpus NER **1,035 s**, with identical
+detections. The gain grows with the data: on the full 181,430-row export, 544,193
+cells reduce to 172,804 distinct lines (3.15×). Inference is the floor — about 43 ms
+per distinct line per model at 2 threads — and line-level inference parallelises
+almost perfectly, so more vCPUs convert directly into wall time.
 
 ---
 
-## 📊 Performance & Timing Benchmarks
+## NER comparison report (`app/ner_report.py`)
 
-| Execution Stage | Original Baseline | Optimized Parallel Pipeline | Net Speedup |
-| :--- | :---: | :---: | :---: |
-| **Model Downloads** *(Uncached)* | ~12.2 mins | ~1.26 mins | **9.6x Faster Download** |
-| **Model Weight Loading** | 10.15s | 3.74s | **2.7x Faster Loading** |
-| **NER Model Execution** | 23.53s | 14.70s | **1.6x Faster Inference** |
-| **Total Completion Time (Cached)** | 34.62s | **15.81s** | **2.19x Faster Total Pipeline** |
+An evaluation tool: it runs the rules and each model separately and writes an Excel
+workbook (Summary, PII Detection, NER Comparison, Anonymization sheets) plus
+`<output>.json`, `<output>_IndicNER.json`, `<output>_XLM_RoBERTa.json` and
+`<output>_Hybrid.json`. It redacts nothing.
 
-### Dataset batch job
-
-Measured on a reference grievance export (`complaint_details`, `complainant_address`,
-`complainant_name`), 2 of 3 models loaded, CPU only, identical detection counts
-before and after (11,399):
-
-| Rows | Cells | Distinct lines | Per-cell NER (old) | Corpus NER (new) |
-| ---: | ---: | ---: | ---: | ---: |
-| 6,000 | 17,913 | 7,833 (2.3x) | 2032 s | **1035 s** |
-
-The gain comes from deduplication, so it grows with the dataset: at 6,000 rows
-duplicates collapse the work 2.3x, but across the full 181,430-row export
-544,193 cells reduce to 172,804 distinct lines — 3.15x. Extrapolating the
-measured 132 ms per distinct line, the full export runs in roughly 6 hours
-against about 17 for the per-cell path, on the same hardware.
-
-Inference itself is the floor: three (or two) transformer passes over ~173k
-distinct lines on CPU. Measured at 2 threads, one model costs ~43 ms per distinct
-line, so all three over the full export land near 10 hours on a 2-vCPU host.
-
-Past that the lever is capacity, not tuning. Line-level inference is embarrassingly
-parallel and the three models are independent, so vCPUs convert almost directly
-into wall time; batching and thread tweaks are worth well under 2x by comparison.
-The GPU path in `main.py` is commented out and would need reinstating to use one.
-
----
-
-## 🔒 Security & Privacy
-
-All processing is executed **100% locally** on your machine or container. No document content, personal identifiers, or metadata are transmitted to external services.
+| Argument | Default | Description |
+| :--- | :--- | :--- |
+| `--input`, `-i` | — | A `.txt` / `.docx` / `.doc` / `.html` / `.json` / `.csv` file, or a folder of them. |
+| `--text`, `-t` | — | Inline text instead of files (`\n` escapes honoured). One of `--input` / `--text` is required. |
+| `--output`, `-o` | `pii_ner_report.xlsx` | Workbook path; the JSON files are written next to it. |
+| `--ner-batch-size` | `24` | Lines per worker mini-batch. |
+| `--queue-size` | `64` | Bound on each worker queue. |
+| `--hf_token` | `$HF_TOKEN` | HuggingFace token. |

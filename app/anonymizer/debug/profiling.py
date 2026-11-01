@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Step timing and peak-memory tracking for the anonymization batch job.
+"""Step timing and peak-memory tracking for the anonymization table job.
 
 Peak RSS is sampled from /proc rather than read at step boundaries: a model load
 allocates and frees inside the step, so start/end readings miss the spike that
@@ -44,6 +43,7 @@ class Step:
         self.detail: dict[str, Any] = {}
 
     def as_dict(self) -> dict[str, Any]:
+        """This step as a JSON-ready dict (seconds, RSS in MB, plus any detail)."""
         return {
             "step": self.name,
             "parent": self.parent,
@@ -70,6 +70,7 @@ class Profiler:
 
     # ── RSS sampling ────────────────────────────────────────────────────
     def _sample_loop(self) -> None:
+        """Background thread: record the highest RSS seen every sample_interval seconds."""
         while not self._stop.wait(self.sample_interval):
             rss = _rss_bytes()
             with self._lock:
@@ -77,6 +78,7 @@ class Profiler:
                     self._peak = rss
 
     def start(self) -> None:
+        """Start the RSS sampler thread (no-op when disabled or already running)."""
         if not self.enabled or self._sampler is not None:
             return
         self._sampler = threading.Thread(
@@ -85,6 +87,7 @@ class Profiler:
         self._sampler.start()
 
     def stop(self) -> None:
+        """Stop the RSS sampler thread (safe to call more than once)."""
         if self._sampler is None:
             return
         self._stop.set()
@@ -122,6 +125,7 @@ class Profiler:
 
     # ── reporting ───────────────────────────────────────────────────────
     def write(self, path: Path, extra: Optional[dict[str, Any]] = None) -> None:
+        """Write all steps, totals and `extra` fields as JSON to `path` (debug runs only)."""
         if not self.enabled:
             return
         path.parent.mkdir(parents=True, exist_ok=True)

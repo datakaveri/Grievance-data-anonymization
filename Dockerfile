@@ -35,11 +35,9 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir hf-transfer
 
-# NOTE: en_core_web_lg is deliberately NOT downloaded here. Presidio is disabled
-# on this branch (app/main.py: full_pii_scan returns regex hits only and
-# _get_presidio_engine is commented out), so the ~600MB spaCy model would never
-# be loaded. Re-add `RUN python -m spacy download en_core_web_lg --quiet` if
-# Presidio is switched back on.
+# NOTE: no spaCy model is downloaded. spaCy is used only for its built-in
+# English/Hindi stopword lists (anonymizer/ner/filters.py), which ship with the
+# package itself.
 
 # Copy application source code
 COPY app/ ./app/
@@ -50,16 +48,16 @@ COPY app/ ./app/
 # https://huggingface.co/settings/tokens, then build with:
 #   DOCKER_BUILDKIT=1 docker build --secret id=hf_token,env=HF_TOKEN -t <tag> .
 # The token is only mounted for this RUN step and is never written to image
-# layers or history. Without it, this step still succeeds for the other two
-# models — IndicNER alone is skipped here and again (gracefully) at runtime.
+# layers or history. Without it, this step still succeeds for XLM-RoBERTa —
+# IndicNER alone is skipped here and again (gracefully) at runtime.
 # The model list and, crucially, each model's use_fast flag live in
-# main._HYBRID_NER_SPECS, and --prefetch reads them from there, so the build
-# caches exactly the tokenizer variant the pipeline loads at runtime. Caching a
-# tokenizer as slow when the pipeline asks for it fast leaves a hole in the cache
-# that only shows up as a network call inside an offline TEE.
-# The three models download concurrently; add --strict to fail the build when any
-# of them is missing (default: warn, so a tokenless build still produces an image
-# that runs with the two ungated models).
+# app/anonymizer/ner/models.py (NER_MODELS), and model_setup.py reads them from
+# there, so the build caches exactly the tokenizer variant the pipeline loads at
+# runtime. Caching a tokenizer as slow when the pipeline asks for it fast leaves
+# a hole in the cache that only shows up as a network call inside an offline TEE.
+# The models download concurrently; add --strict to fail the build when any of
+# them is missing (default: warn, so a tokenless build still produces an image
+# that runs with the ungated model).
 RUN --mount=type=secret,id=hf_token,env=HF_TOKEN \
     python app/model_setup.py --prefetch
 
@@ -72,7 +70,7 @@ ENV HF_TOKEN=""
 RUN mkdir -p /app/config /app/data /app/output /app/work
 
 # Config is mounted at runtime. The job scans /app/config for its JSON config
-# file rather than requiring a fixed name (see batch_pipeline._resolve_config_file),
+# file rather than requiring a fixed name (see anonymizer/config.py resolve_config_file),
 # so it doesn't matter what the caller names it. The job exits after writing the
 # staged dataset.
 VOLUME ["/app/config", "/app/data", "/app/output", "/app/work"]

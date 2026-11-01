@@ -38,14 +38,22 @@ chandra_venv/
 *.pem
 *.key
 
-# Application Data & Outputs
-data/source_images/*
-!data/source_images/.gitkeep
+# Application data and outputs: inputs, results and one-off run files stay local
+data/
+app/data/
 output/
+Anonymised_Grievance_Files/
 *.xlsx
 *.csv
+*.docx
+*.out
 _chandra_tmp/
 _chandra_manifest/
+
+# Local run scripts and per-person / per-run config copies
+run_grievance*.sh
+config/grievance_*/
+config/ramyaconfig.json
 
 # Logs
 *.log
